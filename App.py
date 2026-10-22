@@ -3,19 +3,25 @@ import requests
 import pandas as pd
 import itertools
 
-st.set_page_config(page_title="Pool-Assistenten", layout="wide")
-st.title("⚽ Din Pool-Assistent & Expertanalytiker")
-st.markdown("Din personliga rådgivare som kombinerar marknadsodds, Svenska folket och Tio Tidningars Tips (TT) för att hitta bästa spelvärdet.")
+st.set_page_config(page_title="Pool-Assistenten - Hockey Edition", layout="wide")
+st.title("🏒 Powerplay- & Pool-Assistenten")
+st.markdown("Optimerad för kvällens hockeyomgång för att fälla överstreckade favoriter och maximera din poäng i jobbtävlingen!")
 
 # 1. Välj spel i sidomenyn
 product_map = {
+    "Powerplay": "powerplay",
     "Stryktipset": "stryktipset",
     "Europatipset": "europatipset",
-    "Topptipset": "topptipset",
-    "Powerplay": "powerplay"
+    "Topptipset": "topptipset"
 }
 selected_label = st.sidebar.selectbox("Välj spelform", list(product_map.keys()))
 product = product_map[selected_label]
+
+# Välj strategi för kvällens tävling
+strategy = st.sidebar.selectbox(
+    "Välj taktik för kupongen", 
+    ["Balanced (Blandat)", "Jägaren (Fokus på hög utdelning / skrällar)", "Säkra Spikar (Flest rätt)"]
+)
 
 @st.cache_data(ttl=120)
 def fetch_draws(prod):
@@ -55,19 +61,16 @@ for ev in events:
     num = ev.get("eventNumber")
     desc = ev.get("eventDescription", f"Match {num}")
     
-    # Svenska folket
     sf = ev.get("svenskaFolket") or {}
     s1 = float(sf.get("one", 0) or 0)
     sx = float(sf.get("x", 0) or 0)
     s2 = float(sf.get("two", 0) or 0)
     
-    # Tio Tidningars Tips (TT)
     tt = ev.get("tioTidningarsTips") or {}
     tt1 = int(tt.get("one", 0) or 0)
     ttx = int(tt.get("x", 0) or 0)
     tt2 = int(tt.get("two", 0) or 0)
     
-    # Odds
     odds = ev.get("odds") or {}
     o1 = parse_odd(odds.get("one"))
     ox = parse_odd(odds.get("x"))
@@ -86,59 +89,51 @@ for ev in events:
     vx = round(px - sx, 1)
     v2 = round(p2 - s2, 1)
     
-    # --- EXPERTANALYS & MOTIVERING MED TT ---
+    # --- HOCKEY- & SKRÄLLDETEKTOR ---
     advice = "Avvakta / Normal"
-    reason = "Inga större avvikelser mellan odds, folket och experterna."
+    reason = "Inga extrema avvikelser i odds eller streck."
     
-    if tt1 >= 8:
-        if v1 >= 0:
-            advice = "🔥 Stabil Spik (1)"
-            reason = f"Både experterna ({tt1}/10 tidningar) och oddsen stöder hemmalaget med bra spelvärde."
-        else:
-            advice = "⚠️ Expertiserad Favorit (Varning)"
-            reason = f"Experterna spikar ({tt1}/10), men folket har överstreckat den till {s1}%. Risk för rens om den missar."
-    elif tt2 >= 8:
-        if v2 >= 0:
-            advice = "🔥 Stabil Spik (2)"
-            reason = f"Experterna gillar bortalaget starkt ({tt2}/10 tidningar) och oddsen motiverar det."
-        else:
-            advice = "⚠️ Överstreckad bortafavorit (Varning)"
-            reason = f"Experterna tror på bortalaget ({tt2}/10), men strecken är höga ({s2}%). Gardering rekommenderas."
+    if s1 >= 60 and v1 <= -5:
+        advice = "🚨 Varning för överstreckad favorit (1)"
+        reason = f"Hemmalaget streckas tungt på {s1}%, men oddsen ger dem bara {p1}% chans. Perfekt läge att gardera eller fälla i jobbtävlingen!"
+    elif s2 >= 55 and v2 <= -5:
+        advice = "🚨 Varning för överstreckad bortafavorit (2)"
+        reason = f"Bortalaget är för hårt streckat ({s2}% vs {p2}% i odds). Skrällvarning!"
     elif v1 >= 5:
-        advice = "💡 Värdespik (1)"
-        reason = f"Hemmalaget är undervärderat av folket ({s1}% streck vs {p1}% sannolikhet)."
+        advice = "🔥 Hockey-Värdespik (1)"
+        reason = f"Hemmalaget är undervärderat av folket ({s1}% streck mot {p1}% verklig chans)."
     elif v2 >= 5:
-        advice = "💡 Värdespik (2)"
-        reason = f"Bortalaget är undervärderat av folket ({s2}% streck vs {p2}% sannolikhet)."
+        advice = "🔥 Hockey-Värdespik (2)"
+        reason = f"Bortalaget är undervärderat av folket ({s2}% streck mot {p2}% verklig chans)."
     elif vx >= 4:
-        advice = "💎 Värdekryss (X)"
-        reason = f"Krysset är streckat på {sx}%, men oddsen visar hela {px}% chans."
+        advice = "💎 Rensarkryss (X)"
+        reason = f"I ishockey är kryss ofta underskattade av folket ({sx}% streck vs {px}% i odds)."
 
     match_data.append({
         "Nr": num, "Match": desc,
         "Rekommendation": advice,
         "Motivering": reason,
         "Streck (%)": f"{int(s1)}% - {int(sx)}% - {int(s2)}%",
-        "TT (Tidningar)": f"{tt1} - {ttx} - {tt2}",
+        "TT": f"{tt1}-{ttx}-{tt2}",
         "Värde 1": v1, "Värde X": vx, "Värde 2": v2
     })
 
 df = pd.DataFrame(match_data)
 
-# 2. Visa Assistentens Rekommendationer
-st.subheader("🤖 Expertens Analys & Spelråd")
-st.caption("Här vägs Tio Tidningars Tips (TT) samman med marknadsodds och streckfördelning.")
+# 2. Visa Analys
+st.subheader("🤖 Kvällens Analys & Skräll-detektor")
+st.caption("Här ser du vilka matcher som rensar bäst och vilka favoriter du bör se upp med.")
 
 for idx, row in df.iterrows():
     with st.expander(f"Match {row['Nr']}: {row['Match']} — **{row['Rekommendation']}**"):
-        st.write(f"**Motivering:** {row['Motivering']}")
-        col_a, col_b = st.columns(2)
-        col_a.write(f"📊 **Svenska folket (1-X-2):** {row['Streck (%)']}")
-        col_b.write(f"📰 **Tio Tidningar (1-X-2):** {row['TT (Tidningar)']}")
+        st.write(f"**Varför?** {row['Motivering']}")
+        c_a, c_b = st.columns(2)
+        c_a.write(f"📊 **Folket (1-X-2):** {row['Streck (%)']}")
+        c_b.write(f"📰 **Tidningar (TT):** {row['TT']}")
 
 st.divider()
 
-# 3. Interaktiv Kupong & Reducering
+# 3. Kupong & Reducering
 st.subheader("📝 Bygg System & Reducera")
 
 selections = []
@@ -164,9 +159,9 @@ for idx, row in df.iterrows():
 
 num_matches = len(df)
 st.sidebar.header("⚙️ Reduceringsvillkor")
-min_1, max_1 = st.sidebar.slider("Antal 1:or i systemet", 0, num_matches, (0, num_matches))
-min_x, max_x = st.sidebar.slider("Antal X i systemet", 0, num_matches, (0, num_matches))
-min_2, max_2 = st.sidebar.slider("Antal 2:or i systemet", 0, num_matches, (0, num_matches))
+min_1, max_1 = st.sidebar.slider("Antal 1:or", 0, num_matches, (0, num_matches))
+min_x, max_x = st.sidebar.slider("Antal X", 0, num_matches, (0, num_matches))
+min_2, max_2 = st.sidebar.slider("Antal 2:or", 0, num_matches, (0, num_matches))
 
 if all(len(s) > 0 for s in selections):
     all_rows = list(itertools.product(*selections))
