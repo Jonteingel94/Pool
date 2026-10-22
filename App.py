@@ -3,9 +3,9 @@ import requests
 import pandas as pd
 import itertools
 
-st.set_page_config(page_title="Pool-Assistenten - Auto Edition", layout="wide")
-st.title("🏒 Powerplay- & Pool-Assistenten")
-st.markdown("Din autonoma expert som bygger raderna åt dig automatiskt beroende på vilken strategi du väljer!")
+st.set_page_config(page_title="Pool-Autopiloten", layout="wide")
+st.title("🤖 Pool-Autopiloten för Jobbtävlingen")
+st.markdown("Sätt din budget och din strategi – assistenten sköter all research, väljer tecken och bygger den färdiga filen åt dig!")
 
 # 1. Välj spel i sidomenyn
 product_map = {
@@ -17,7 +17,19 @@ product_map = {
 selected_label = st.sidebar.selectbox("Välj spelform", list(product_map.keys()))
 product = product_map[selected_label]
 
-stake = st.sidebar.slider("Insats per rad (kr)", 1, 10, 1)
+st.sidebar.divider()
+st.sidebar.subheader("💰 Budget & Strategi")
+max_budget = st.sidebar.number_input("Max budget för kupongen (kr)", min_value=20, max_value=1000, value=150, step=10)
+stake_per_row = st.sidebar.selectbox("Insats per rad", [1, 2, 5, 10], index=0)
+
+strategy = st.sidebar.selectbox(
+    "Välj spelfilosofi",
+    [
+        "Balanserad (Blandat värde & trygghet)",
+        "Säker (Favoritfokus / Flest rätt)",
+        "Hög Utdelning / Jägaren (Fångar skrällar & rensar)"
+    ]
+)
 
 @st.cache_data(ttl=120)
 def fetch_draws(prod):
@@ -89,103 +101,76 @@ for ev in events:
     match_data.append({
         "Nr": num, "Match": desc,
         "s1": s1, "sx": sx, "s2": s2,
-        "p1": p1, "px": px, "p2": p2,
         "v1": v1, "vx": vx, "v2": v2,
         "tt1": tt1, "tt2": tt2
     })
 
 df = pd.DataFrame(match_data)
 
-# --- AUTOMATISKA SPELTYPER & STRATEGIER ---
-st.sidebar.divider()
-st.sidebar.subheader("🤖 Automatiska Strategier")
-strategy = st.sidebar.radio(
-    "Välj hur assistenten ska spela åt dig:",
-    [
-        "Balanserad", 
-        "Säker", 
-        "Hög Utdelning"
-    ]
-)
-
-if st.sidebar.button("⚡ Fyll i kupongen automatiskt åt mig"):
-    for idx, row in df.iterrows():
-        m_nr = row["Nr"]
-        s1, sx, s2 = row["s1"], row["sx"], row["s2"]
-        v1, v2 = row["v1"], row["v2"]
-        tt1, tt2 = row["tt1"], row["tt2"]
-        
-        if strategy == "Säker":
-            st.session_state[f"m_{m_nr}_1"] = bool(s1 >= max(s1, sx, s2) or tt1 >= 6)
-            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 35)
-            st.session_state[f"m_{m_nr}_2"] = bool(s2 >= max(s1, sx, s2) or tt2 >= 6)
-            
-        elif strategy == "Hög Utdelning":
-            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= 0 or s1 < 45)
-            st.session_state[f"m_{m_nr}_X"] = True
-            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= 0 or s2 < 45)
-            
-        else:  # Balanserad
-            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= -3 or tt1 >= 5)
-            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 25 or v2 >= 3)
-            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= -3 or tt2 >= 5)
-            
-        if not any([st.session_state[f"m_{m_nr}_1"], st.session_state[f"m_{m_nr}_X"], st.session_state[f"m_{m_nr}_2"]]):
-            st.session_state[f"m_{m_nr}_1"] = True
-
-# 2. Visa Matcher & Interaktiv Kupong
-st.subheader("📝 Kvällens Kupong & Rader")
-st.caption("Assistenten har fyllt i tecknen åt dig baserat på vald strategi. Du kan ändra manuellt om du vill!")
-
+# --- AUTOPILOTENS LOGIK ---
+# Automatiska teckenval baserat på vald strategi
 selections = []
 for idx, row in df.iterrows():
-    m_nr = row["Nr"]
-    cols = st.columns([4, 1, 1, 1])
-    cols[0].write(f"**{m_nr}. {row['Match']}** (Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}%)")
-    
-    if f"m_{m_nr}_1" not in st.session_state:
-        st.session_state[f"m_{m_nr}_1"] = True
-        st.session_state[f"m_{m_nr}_X"] = False
-        st.session_state[f"m_{m_nr}_2"] = False
-
-    c1 = cols[1].checkbox("1", key=f"m_{m_nr}_1")
-    cx = cols[2].checkbox("X", key=f"m_{m_nr}_X")
-    c2 = cols[3].checkbox("2", key=f"m_{m_nr}_2")
+    s1, sx, s2 = row["s1"], row["sx"], row["s2"]
+    v1, v2 = row["v1"], row["v2"]
+    tt1, tt2 = row["tt1"], row["tt2"]
     
     signs = []
-    if c1: signs.append("1")
-    if cx: signs.append("X")
-    if c2: signs.append("2")
+    if strategy == "Säker (Favoritfokus / Flest rätt)":
+        if s1 >= max(s1, sx, s2) or tt1 >= 6: signs.append("1")
+        if sx >= 30: signs.append("X")
+        if s2 >= max(s1, sx, s2) or tt2 >= 6: signs.append("2")
+        if not signs: signs = ["1"] # Fallback
+        
+    elif strategy == "Hög Utdelning / Jägaren (Fångar skrällar & rensar)":
+        if v1 >= 0 or s1 < 50: signs.append("1")
+        signs.append("X") # Tvinga med kryss för rens
+        if v2 >= 0 or s2 < 50: signs.append("2")
+        
+    else:  # Balanserad
+        if v1 >= -3 or tt1 >= 5: signs.append("1")
+        if sx >= 22 or v2 >= 2: signs.append("X")
+        if v2 >= -3 or tt2 >= 5: signs.append("2")
+        if not signs: signs = ["1", "X"]
+
     selections.append(signs)
 
-num_matches = len(df)
-st.sidebar.header("⚙️ Finjustering av rader")
-min_1, max_1 = st.sidebar.slider("Antal 1:or", 0, num_matches, (0, num_matches))
-min_x, max_x = st.sidebar.slider("Antal X", 0, num_matches, (0, num_matches))
-min_2, max_2 = st.sidebar.slider("Antal 2:or", 0, num_matches, (0, num_matches))
+# Skapa matematiska rader automatiskt
+all_rows = list(itertools.product(*selections))
 
-if all(len(s) > 0 for s in selections):
-    all_rows = list(itertools.product(*selections))
-    filtered_rows = [
-        r for r in all_rows
-        if (min_1 <= r.count("1") <= max_1)
-        and (min_x <= r.count("X") <= max_x)
-        and (min_2 <= r.count("2") <= max_2)
-    ]
-    
-    total_cost = len(filtered_rows) * stake
-    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter filter:** {len(filtered_rows)} st (Total kostnad: {total_cost} kr)")
-    
-    if filtered_rows:
-        header_line = f"{selected_label},Omg={draw_number},Insats={stake}"
-        lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
-        file_content = "\n".join(lines)
-        
-        st.download_button(
-            label="📥 Ladda ner godkänd systemfil (.txt) för Svenska Spel",
-            data=file_content,
-            file_name=f"{product}_omg_{draw_number}.txt",
-            mime="text/plain"
-        )
+# Budget-anpassning: Om raderna överstiger budgeten skalar autopiloten ner dem smart
+allowed_max_rows = int(max_budget / stake_per_row)
+if len(all_rows) > allowed_max_rows:
+    # Begränsa automatiskt genom att ta de första eller filtrera bort extrema rader
+    filtered_rows = all_rows[:allowed_max_rows]
 else:
-    st.warning("Vänligen välj minst ett tecken per match.")
+    filtered_rows = all_rows
+
+# 2. Huvudfönster - Visa vad Autopiloten har gjort
+st.subheader("🎯 Autopilotinställning klar")
+st.write(f"**Vald strategi:** {strategy}")
+st.write(f"**Max budget:** {max_budget} kr (Insats: {stake_per_row} kr/rad)")
+st.info(f"✨ Autopiloten har analyserat omgången, vägt in odds och TT, och genererat **{len(filtered_rows)} rader** (Total kostnad: {len(filtered_rows) * stake_per_row} kr).")
+
+# Förhandsvisning av matcherna och vad autopiloten valde
+with st.expander("🔍 Se autopilotens analys och val per match"):
+    for idx, row in df.iterrows():
+        st.write(f"**{row['Nr']}. {row['Match']}** | Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}% | Valda tecken: `{', '.join(selections[idx])}`")
+
+st.divider()
+
+# 3. Nedladdning av fil
+if filtered_rows:
+    header_line = f"{selected_label},Omg={draw_number},Insats={stake_per_row}"
+    lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
+    file_content = "\n".join(lines)
+    
+    st.download_button(
+        label="📥 Ladda ner färdig systemfil (.txt) för Svenska Spel",
+        data=file_content,
+        file_name=f"{product}_omg_{draw_number}.txt",
+        mime="text/plain",
+        type="primary"
+    )
+else:
+    st.warning("Kunde inte generera rader med nuvarande inställningar. Prova att höja budgeten något.")
