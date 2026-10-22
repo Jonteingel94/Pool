@@ -4,8 +4,8 @@ import pandas as pd
 import itertools
 
 st.set_page_config(page_title="Pool-Autopiloten", layout="wide")
-st.title("🤖 Pool-Autopiloten för Jobbtävlingen")
-st.markdown("Sätt din budget och din strategi – assistenten sköter all research, väljer tecken och bygger den färdiga filen åt dig!")
+st.title("🤖 Intelligent Pool-Autopilot")
+st.markdown("Sätt din budget och strategi – assistenten analyserar oddsen, poängsätter alla rader och handplockar de bästa inom din budget!")
 
 # 1. Välj spel i sidomenyn
 product_map = {
@@ -19,7 +19,7 @@ product = product_map[selected_label]
 
 st.sidebar.divider()
 st.sidebar.subheader("💰 Budget & Strategi")
-max_budget = st.sidebar.number_input("Max budget för kupongen (kr)", min_value=20, max_value=1000, value=150, step=10)
+max_budget = st.sidebar.number_input("Max budget för kupongen (kr)", min_value=20, max_value=1000, value=50, step=10)
 stake_per_row = st.sidebar.selectbox("Insats per rad", [1, 2, 5, 10], index=0)
 
 strategy = st.sidebar.selectbox(
@@ -101,14 +101,14 @@ for ev in events:
     match_data.append({
         "Nr": num, "Match": desc,
         "s1": s1, "sx": sx, "s2": s2,
+        "p1": p1, "px": px, "p2": p2,
         "v1": v1, "vx": vx, "v2": v2,
         "tt1": tt1, "tt2": tt2
     })
 
 df = pd.DataFrame(match_data)
 
-# --- AUTOPILOTENS LOGIK ---
-# Automatiska teckenval baserat på vald strategi
+# --- AUTOPILOTENS LOGIK & VÄRDERANKNING ---
 selections = []
 for idx, row in df.iterrows():
     s1, sx, s2 = row["s1"], row["sx"], row["s2"]
@@ -120,11 +120,11 @@ for idx, row in df.iterrows():
         if s1 >= max(s1, sx, s2) or tt1 >= 6: signs.append("1")
         if sx >= 30: signs.append("X")
         if s2 >= max(s1, sx, s2) or tt2 >= 6: signs.append("2")
-        if not signs: signs = ["1"] # Fallback
+        if not signs: signs = ["1"]
         
     elif strategy == "Hög Utdelning / Jägaren (Fångar skrällar & rensar)":
         if v1 >= 0 or s1 < 50: signs.append("1")
-        signs.append("X") # Tvinga med kryss för rens
+        signs.append("X")
         if v2 >= 0 or s2 < 50: signs.append("2")
         
     else:  # Balanserad
@@ -135,31 +135,44 @@ for idx, row in df.iterrows():
 
     selections.append(signs)
 
-# Skapa matematiska rader automatiskt
+# Skapa alla matematiska kombinationer
 all_rows = list(itertools.product(*selections))
-
-# Budget-anpassning: Om raderna överstiger budgeten skalar autopiloten ner dem smart
 allowed_max_rows = int(max_budget / stake_per_row)
-if len(all_rows) > allowed_max_rows:
-    # Begränsa automatiskt genom att ta de första eller filtrera bort extrema rader
-    filtered_rows = all_rows[:allowed_max_rows]
-else:
-    filtered_rows = all_rows
 
-# 2. Huvudfönster - Visa vad Autopiloten har gjort
-st.subheader("🎯 Autopilotinställning klar")
+# INTELLIGENT URVAL: Poängsätt varje rad baserat på spelvärde
+scored_rows = []
+for r in all_rows:
+    row_score = 0
+    for i, sign in enumerate(r):
+        m = match_data[i]
+        if sign == "1":
+            row_score += m["v1"]
+        elif sign == "X":
+            row_score += m["vx"]
+        elif sign == "2":
+            row_score += m["v2"]
+    scored_rows.append((row_score, r))
+
+# Sortera efter högst spelvärde/poäng
+scored_rows.sort(key=lambda x: x[0], reverse=True)
+
+# Plocka ut de bästa raderna upp till tillåten maxbudget
+best_rows = [r for score, r in scored_rows]
+filtered_rows = best_rows[:allowed_max_rows]
+
+# 2. Huvudfönster
+st.subheader("🎯 Autopilotens Smart Handplockade Rader")
 st.write(f"**Vald strategi:** {strategy}")
 st.write(f"**Max budget:** {max_budget} kr (Insats: {stake_per_row} kr/rad)")
-st.info(f"✨ Autopiloten har analyserat omgången, vägt in odds och TT, och genererat **{len(filtered_rows)} rader** (Total kostnad: {len(filtered_rows) * stake_per_row} kr).")
+st.info(f"✨ Appen har analyserat alla kombinationer, viktat in odds och handplockat de **{len(filtered_rows)} bästa raderna** (Total kostnad: {len(filtered_rows) * stake_per_row} kr).")
 
-# Förhandsvisning av matcherna och vad autopiloten valde
-with st.expander("🔍 Se autopilotens analys och val per match"):
+with st.expander("🔍 Se autopilotens valda tecken per match"):
     for idx, row in df.iterrows():
-        st.write(f"**{row['Nr']}. {row['Match']}** | Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}% | Valda tecken: `{', '.join(selections[idx])}`")
+        st.write(f"**{row['Nr']}. {row['Match']}** | Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}% | Tecken: `{', '.join(selections[idx])}`")
 
 st.divider()
 
-# 3. Nedladdning av fil
+# 3. Nedladdning
 if filtered_rows:
     header_line = f"{selected_label},Omg={draw_number},Insats={stake_per_row}"
     lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
@@ -173,4 +186,4 @@ if filtered_rows:
         type="primary"
     )
 else:
-    st.warning("Kunde inte generera rader med nuvarande inställningar. Prova att höja budgeten något.")
+    st.warning("Kunde inte generera rader. Prova att justera inställningarna.")
