@@ -5,7 +5,7 @@ import itertools
 
 st.set_page_config(page_title="Pool-Assistenten - Hockey Edition", layout="wide")
 st.title("🏒 Powerplay- & Pool-Assistenten")
-st.markdown("Optimerad för kvällens hockeyomgång för att fälla överstreckade favoriter och maximera din poäng i jobbtävlingen!")
+st.markdown("Optimerad för kvällens hockeyomgång. Genererar rätt filformat direkt för Svenska Spels filuppladdning!")
 
 # 1. Välj spel i sidomenyn
 product_map = {
@@ -17,11 +17,8 @@ product_map = {
 selected_label = st.sidebar.selectbox("Välj spelform", list(product_map.keys()))
 product = product_map[selected_label]
 
-# Välj strategi för kvällens tävling
-strategy = st.sidebar.selectbox(
-    "Välj taktik för kupongen", 
-    ["Balanced (Blandat)", "Jägaren (Fokus på hög utdelning / skrällar)", "Säkra Spikar (Flest rätt)"]
-)
+# Välj insats per rad (1-10 kr)
+stake = st.sidebar.slider("Insats per rad (kr)", 1, 10, 1)
 
 @st.cache_data(ttl=120)
 def fetch_draws(prod):
@@ -49,6 +46,7 @@ if not draws:
 draw_options = {f"Omgång {d.get('drawNumber')} - {d.get('drawComment', '')}": d for d in draws}
 selected_draw_key = st.sidebar.selectbox("Välj omgång", list(draw_options.keys()))
 draw = draw_options[selected_draw_key]
+draw_number = draw.get('drawNumber')
 
 if st.sidebar.button("🔄 Uppdatera live-data"):
     st.cache_data.clear()
@@ -89,41 +87,38 @@ for ev in events:
     vx = round(px - sx, 1)
     v2 = round(p2 - s2, 1)
     
-    # --- HOCKEY- & SKRÄLLDETEKTOR ---
+    # --- SKRÄLLDETEKTOR ---
     advice = "Avvakta / Normal"
     reason = "Inga extrema avvikelser i odds eller streck."
     
     if s1 >= 60 and v1 <= -5:
         advice = "🚨 Varning för överstreckad favorit (1)"
-        reason = f"Hemmalaget streckas tungt på {s1}%, men oddsen ger dem bara {p1}% chans. Perfekt läge att gardera eller fälla i jobbtävlingen!"
+        reason = f"Hemmalaget streckas tungt på {s1}%, men oddsen ger dem bara {p1}% chans."
     elif s2 >= 55 and v2 <= -5:
         advice = "🚨 Varning för överstreckad bortafavorit (2)"
-        reason = f"Bortalaget är för hårt streckat ({s2}% vs {p2}% i odds). Skrällvarning!"
+        reason = f"Bortalaget är för hårt streckat ({s2}% vs {p2}% i odds)."
     elif v1 >= 5:
-        advice = "🔥 Hockey-Värdespik (1)"
-        reason = f"Hemmalaget är undervärderat av folket ({s1}% streck mot {p1}% verklig chans)."
+        advice = "🔥 Värdespik (1)"
+        reason = f"Hemmalaget är undervärderat av folket ({s1}% streck mot {p1}% chans)."
     elif v2 >= 5:
-        advice = "🔥 Hockey-Värdespik (2)"
-        reason = f"Bortalaget är undervärderat av folket ({s2}% streck mot {p2}% verklig chans)."
+        advice = "🔥 Värdespik (2)"
+        reason = f"Bortalaget är undervärderat av folket ({s2}% streck mot {p2}% chans)."
     elif vx >= 4:
         advice = "💎 Rensarkryss (X)"
-        reason = f"I ishockey är kryss ofta underskattade av folket ({sx}% streck vs {px}% i odds)."
+        reason = f"Krysset är underskattat av folket ({sx}% streck vs {px}% i odds)."
 
     match_data.append({
         "Nr": num, "Match": desc,
         "Rekommendation": advice,
         "Motivering": reason,
         "Streck (%)": f"{int(s1)}% - {int(sx)}% - {int(s2)}%",
-        "TT": f"{tt1}-{ttx}-{tt2}",
-        "Värde 1": v1, "Värde X": vx, "Värde 2": v2
+        "TT": f"{tt1}-{ttx}-{tt2}"
     })
 
 df = pd.DataFrame(match_data)
 
 # 2. Visa Analys
 st.subheader("🤖 Kvällens Analys & Skräll-detektor")
-st.caption("Här ser du vilka matcher som rensar bäst och vilka favoriter du bör se upp med.")
-
 for idx, row in df.iterrows():
     with st.expander(f"Match {row['Nr']}: {row['Match']} — **{row['Rekommendation']}**"):
         st.write(f"**Varför?** {row['Motivering']}")
@@ -172,16 +167,21 @@ if all(len(s) > 0 for s in selections):
         and (min_2 <= r.count("2") <= max_2)
     ]
     
-    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter reducering:** {len(filtered_rows)} st (Kostnad: {len(filtered_rows)} kr)")
+    total_cost = len(filtered_rows) * stake
+    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter reducering:** {len(filtered_rows)} st (Total kostnad: {total_cost} kr)")
     
     if filtered_rows:
-        lines = ["E"] + [",".join(r) for r in filtered_rows]
+        # Skapa korrekt filformat enligt Svenska Spels regelverk:
+        # Rad 1: Produkt,omg=X,insats=Y
+        # Följande rader: E,1,X,2,... (för enkelrader)
+        header_line = f"{selected_label},Omg={draw_number},Insats={stake}"
+        lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
         file_content = "\n".join(lines)
         
         st.download_button(
-            label="📥 Ladda ner systemfil (.txt) för Svenska Spel",
+            label="📥 Ladda ner godkänd systemfil (.txt) för Svenska Spel",
             data=file_content,
-            file_name=f"{product}_omg_{draw.get('drawNumber')}.txt",
+            file_name=f"{product}_omg_{draw_number}.txt",
             mime="text/plain"
         )
 else:
