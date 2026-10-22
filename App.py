@@ -108,7 +108,6 @@ strategy = st.sidebar.radio(
     ]
 )
 
-# Sätt automatiska värden i session state baserat på strategi
 if st.sidebar.button("⚡ Fyll i kupongen automatiskt åt mig"):
     for idx, row in df.iterrows():
         m_nr = row["Nr"]
@@ -116,81 +115,4 @@ if st.sidebar.button("⚡ Fyll i kupongen automatiskt åt mig"):
         v1, v2 = row["v1"], row["v2"]
         tt1, tt2 = row["tt1"], row["tt2"]
         
-        if strategy == "Säker (Spikar favoriter / Flest rätt)":
-            # Spika den med högst streck eller expertstöd
-            st.session_state[f"m_{m_nr}_1"] = bool(s1 >= max(s1, sx, s2) or tt1 >= 6)
-            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 35) # Ta med kryss om det är jämnt
-            st.session_state[f"m_{m_nr}_2"] = bool(s2 >= max(s1, sx, s2) or tt2 >= 6)
-            
-        elif strategy == "Hög Utdelning / Jägaren (Fångar skrällar)":
-            # Fäll överstreckade favoriter, gardera hårt eller välj värdetecken
-            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= 0 or s1 < 45)
-            st.session_state[f"m_{m_nr}_X"] = True  # Alltid kryss för att rensa
-            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= 0 or s2 < 45)
-            
-        else:  # Balanserad
-            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= -3 or tt1 >= 5)
-            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 25 or v2 >= 3)
-            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= -3 or tt2 >= 5)
-            
-        # Säkerställ att minst ett tecken alltid är valt per match
-        if not any([st.session_state[f"m_{m_nr}_1"], st.session_state[f"m_{m_nr}_X"], st.session_state[f"m_{m_nr}_2"]]):
-            st.session_state[f"m_{m_nr}_1"] = True
-
-# 2. Visa Matcher & Interaktiv Kupong
-st.subheader("📝 Kvällens Kupong & Rader")
-st.caption("Assistenten har fyllt i tecknen åt dig baserat på vald strategi. Du kan ändra manuellt om du vill!")
-
-selections = []
-for idx, row in df.iterrows():
-    m_nr = row["Nr"]
-    cols = st.columns([4, 1, 1, 1])
-    cols[0].write(f"**{m_nr}. {row['Match']}** (Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2']}%)")
-    
-    # Initiera om saknas
-    if f"m_{m_nr}_1" not in st.session_state:
-        st.session_state[f"m_{m_nr}_1"] = True
-        st.session_state[f"m_{m_nr}_X"] = False
-        st.session_state[f"m_{m_nr}_2"] = False
-
-    c1 = cols[1].checkbox("1", key=f"m_{m_nr}_1")
-    cx = cols[2].checkbox("X", key=f"m_{m_nr}_X")
-    c2 = cols[3].checkbox("2", key=f"m_{m_nr}_2")
-    
-    signs = []
-    if c1: signs.append("1")
-    if cx: signs.append("X")
-    if c2: signs.append("2")
-    selections.append(signs)
-
-num_matches = len(df)
-st.sidebar.header("⚙️ Finjustering av rader")
-min_1, max_1 = st.sidebar.slider("Antal 1:or", 0, num_matches, (0, num_matches))
-min_x, max_x = st.sidebar.slider("Antal X", 0, num_matches, (0, num_matches))
-min_2, max_2 = st.sidebar.slider("Antal 2:or", 0, num_matches, (0, num_matches))
-
-if all(len(s) > 0 for s in selections):
-    all_rows = list(itertools.product(*selections))
-    filtered_rows = [
-        r for r in all_rows
-        if (min_1 <= r.count("1") <= max_1)
-        and (min_x <= r.count("X") <= max_x)
-        and (min_2 <= r.count("2") <= max_2)
-    ]
-    
-    total_cost = len(filtered_rows) * stake
-    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter filter:** {filtered_rows.__len__()} st (Total kostnad: {total_cost} kr)")
-    
-    if filtered_rows:
-        header_line = f"{selected_label},Omg={draw_number},Insats={stake}"
-        lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
-        file_content = "\n".join(lines)
-        
-        st.download_button(
-            label="📥 Ladda ner godkänd systemfil (.txt) för Svenska Spel",
-            data=file_content,
-            file_name=f"{product}_omg_{draw_number}.txt",
-            mime="text/plain"
-        )
-else:
-    st.warning("Vänligen välj minst ett tecken per match.")
+        if strategy == "Säker (Sp
