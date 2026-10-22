@@ -3,9 +3,9 @@ import requests
 import pandas as pd
 import itertools
 
-st.set_page_config(page_title="Pool-Assistenten - Hockey Edition", layout="wide")
+st.set_page_config(page_title="Pool-Assistenten - Auto Edition", layout="wide")
 st.title("🏒 Powerplay- & Pool-Assistenten")
-st.markdown("Optimerad för kvällens hockeyomgång. Genererar rätt filformat direkt för Svenska Spels filuppladdning!")
+st.markdown("Din autonoma expert som bygger raderna åt dig automatiskt beroende på vilken strategi du väljer!")
 
 # 1. Välj spel i sidomenyn
 product_map = {
@@ -17,7 +17,6 @@ product_map = {
 selected_label = st.sidebar.selectbox("Välj spelform", list(product_map.keys()))
 product = product_map[selected_label]
 
-# Välj insats per rad (1-10 kr)
 stake = st.sidebar.slider("Insats per rad (kr)", 1, 10, 1)
 
 @st.cache_data(ttl=120)
@@ -87,56 +86,68 @@ for ev in events:
     vx = round(px - sx, 1)
     v2 = round(p2 - s2, 1)
     
-    # --- SKRÄLLDETEKTOR ---
-    advice = "Avvakta / Normal"
-    reason = "Inga extrema avvikelser i odds eller streck."
-    
-    if s1 >= 60 and v1 <= -5:
-        advice = "🚨 Varning för överstreckad favorit (1)"
-        reason = f"Hemmalaget streckas tungt på {s1}%, men oddsen ger dem bara {p1}% chans."
-    elif s2 >= 55 and v2 <= -5:
-        advice = "🚨 Varning för överstreckad bortafavorit (2)"
-        reason = f"Bortalaget är för hårt streckat ({s2}% vs {p2}% i odds)."
-    elif v1 >= 5:
-        advice = "🔥 Värdespik (1)"
-        reason = f"Hemmalaget är undervärderat av folket ({s1}% streck mot {p1}% chans)."
-    elif v2 >= 5:
-        advice = "🔥 Värdespik (2)"
-        reason = f"Bortalaget är undervärderat av folket ({s2}% streck mot {p2}% chans)."
-    elif vx >= 4:
-        advice = "💎 Rensarkryss (X)"
-        reason = f"Krysset är underskattat av folket ({sx}% streck vs {px}% i odds)."
-
     match_data.append({
         "Nr": num, "Match": desc,
-        "Rekommendation": advice,
-        "Motivering": reason,
-        "Streck (%)": f"{int(s1)}% - {int(sx)}% - {int(s2)}%",
-        "TT": f"{tt1}-{ttx}-{tt2}"
+        "s1": s1, "sx": sx, "s2": s2,
+        "p1": p1, "px": px, "p2": p2,
+        "v1": v1, "vx": vx, "v2": v2,
+        "tt1": tt1, "tt2": tt2
     })
 
 df = pd.DataFrame(match_data)
 
-# 2. Visa Analys
-st.subheader("🤖 Kvällens Analys & Skräll-detektor")
-for idx, row in df.iterrows():
-    with st.expander(f"Match {row['Nr']}: {row['Match']} — **{row['Rekommendation']}**"):
-        st.write(f"**Varför?** {row['Motivering']}")
-        c_a, c_b = st.columns(2)
-        c_a.write(f"📊 **Folket (1-X-2):** {row['Streck (%)']}")
-        c_b.write(f"📰 **Tidningar (TT):** {row['TT']}")
+# --- AUTOMATISKA SPELTYPER & STRATEGIER ---
+st.sidebar.divider()
+st.sidebar.subheader("🤖 Automatiska Strategier")
+strategy = st.sidebar.radio(
+    "Välj hur assistenten ska spela åt dig:",
+    [
+        "Balanserad (Blandat värde)", 
+        "Säker (Spikar favoriter / Flest rätt)", 
+        "Hög Utdelning / Jägaren (Fångar skrällar)"
+    ]
+)
 
-st.divider()
+# Sätt automatiska värden i session state baserat på strategi
+if st.sidebar.button("⚡ Fyll i kupongen automatiskt åt mig"):
+    for idx, row in df.iterrows():
+        m_nr = row["Nr"]
+        s1, sx, s2 = row["s1"], row["sx"], row["s2"]
+        v1, v2 = row["v1"], row["v2"]
+        tt1, tt2 = row["tt1"], row["tt2"]
+        
+        if strategy == "Säker (Spikar favoriter / Flest rätt)":
+            # Spika den med högst streck eller expertstöd
+            st.session_state[f"m_{m_nr}_1"] = bool(s1 >= max(s1, sx, s2) or tt1 >= 6)
+            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 35) # Ta med kryss om det är jämnt
+            st.session_state[f"m_{m_nr}_2"] = bool(s2 >= max(s1, sx, s2) or tt2 >= 6)
+            
+        elif strategy == "Hög Utdelning / Jägaren (Fångar skrällar)":
+            # Fäll överstreckade favoriter, gardera hårt eller välj värdetecken
+            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= 0 or s1 < 45)
+            st.session_state[f"m_{m_nr}_X"] = True  # Alltid kryss för att rensa
+            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= 0 or s2 < 45)
+            
+        else:  # Balanserad
+            st.session_state[f"m_{m_nr}_1"] = bool(v1 >= -3 or tt1 >= 5)
+            st.session_state[f"m_{m_nr}_X"] = bool(sx >= 25 or v2 >= 3)
+            st.session_state[f"m_{m_nr}_2"] = bool(v2 >= -3 or tt2 >= 5)
+            
+        # Säkerställ att minst ett tecken alltid är valt per match
+        if not any([st.session_state[f"m_{m_nr}_1"], st.session_state[f"m_{m_nr}_X"], st.session_state[f"m_{m_nr}_2"]]):
+            st.session_state[f"m_{m_nr}_1"] = True
 
-# 3. Kupong & Reducering
-st.subheader("📝 Bygg System & Reducera")
+# 2. Visa Matcher & Interaktiv Kupong
+st.subheader("📝 Kvällens Kupong & Rader")
+st.caption("Assistenten har fyllt i tecknen åt dig baserat på vald strategi. Du kan ändra manuellt om du vill!")
 
 selections = []
 for idx, row in df.iterrows():
     m_nr = row["Nr"]
     cols = st.columns([4, 1, 1, 1])
-    cols[0].write(f"**{m_nr}. {row['Match']}**")
+    cols[0].write(f"**{m_nr}. {row['Match']}** (Folket: {int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2']}%)")
     
+    # Initiera om saknas
     if f"m_{m_nr}_1" not in st.session_state:
         st.session_state[f"m_{m_nr}_1"] = True
         st.session_state[f"m_{m_nr}_X"] = False
@@ -153,7 +164,7 @@ for idx, row in df.iterrows():
     selections.append(signs)
 
 num_matches = len(df)
-st.sidebar.header("⚙️ Reduceringsvillkor")
+st.sidebar.header("⚙️ Finjustering av rader")
 min_1, max_1 = st.sidebar.slider("Antal 1:or", 0, num_matches, (0, num_matches))
 min_x, max_x = st.sidebar.slider("Antal X", 0, num_matches, (0, num_matches))
 min_2, max_2 = st.sidebar.slider("Antal 2:or", 0, num_matches, (0, num_matches))
@@ -168,12 +179,9 @@ if all(len(s) > 0 for s in selections):
     ]
     
     total_cost = len(filtered_rows) * stake
-    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter reducering:** {len(filtered_rows)} st (Total kostnad: {total_cost} kr)")
+    st.info(f"**Matematiska rader:** {len(all_rows)} st ➡️ **Efter filter:** {filtered_rows.__len__()} st (Total kostnad: {total_cost} kr)")
     
     if filtered_rows:
-        # Skapa korrekt filformat enligt Svenska Spels regelverk:
-        # Rad 1: Produkt,omg=X,insats=Y
-        # Följande rader: E,1,X,2,... (för enkelrader)
         header_line = f"{selected_label},Omg={draw_number},Insats={stake}"
         lines = [header_line] + [f"E," + ",".join(r) for r in filtered_rows]
         file_content = "\n".join(lines)
@@ -185,4 +193,4 @@ if all(len(s) > 0 for s in selections):
             mime="text/plain"
         )
 else:
-    st.warning("Du måste välja minst ett tecken i samtliga matcher.")
+    st.warning("Vänligen välj minst ett tecken per match.")
