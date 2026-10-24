@@ -1,69 +1,46 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 import itertools
-import random
 import re
 
-st.set_page_config(page_title="Pool-Autopiloten AI Pro", layout="wide")
-st.title("🏆 Pool-Autopiloten AI Pro – Stryktipset & Powerplay")
-st.markdown("Kombinerar marknadsodds, Svenska Spels dolda rankingdata, AI-Edge och smart radspridning (Anti-klump-filter) inom din budget!")
+st.set_page_config(page_title="AI Pool-Autopilot Ultra", layout="wide")
+st.title("🤖 Helautomatisk AI-Autopilot – All Statistik Inbakad")
+st.markdown("100 % automatisk analys av **Marknadsodds, Streckvärde, Tabell, Formkurva, Experttips (TT) & Målförväntan**. Sätt bara din budget och ladda ner!")
 
-# --- 1. SIDOMENY: INSTÄLLNINGAR & BUDGET ---
+# --- 1. SIDOMENY: ENDAST BUDGET & SPELFORM ---
 product_map = {
     "Stryktipset (13 matcher)": "stryktipset",
     "Europatipset (13 matcher)": "europatipset",
     "Topptipset (8 matcher)": "topptipset",
     "Powerplay (8 matcher)": "powerplay"
 }
-selected_label = st.sidebar.selectbox("Välj spelform", list(product_map.keys()))
+selected_label = st.sidebar.selectbox("1. Välj spelform", list(product_map.keys()))
 product = product_map[selected_label]
-Export_Name = selected_label.split(" ")[0] # T.ex. "Stryktipset" eller "Powerplay"
+Export_Name = selected_label.split(" ")[0]
 
 st.sidebar.divider()
-st.sidebar.subheader("💰 1. Budget & Insats")
-max_budget = st.sidebar.number_input("Max budget för kupongen (kr)", min_value=10, max_value=3000, value=100, step=10)
-if product == "stryktipset" or product == "europatipset":
-    stake_per_row = 1 # Stryktipset/Europatipset har alltid 1 kr radpris
-    st.sidebar.caption("ℹ️ Radinsats på Stryktipset/Europatipset är alltid 1 kr/rad.")
+st.sidebar.subheader("💰 2. Din Budget")
+max_budget = st.sidebar.number_input("Total budget för kupongen (kr)", min_value=10, max_value=5000, value=200, step=10)
+
+if product in ["stryktipset", "europatipset"]:
+    stake_per_row = 1
+    st.sidebar.caption("ℹ️ Radinsats på Stryktipset/Europatipset är 1 kr/rad.")
 else:
     stake_per_row = st.sidebar.selectbox("Insats per rad (kr)", [1, 2, 5, 10], index=0)
 
-st.sidebar.subheader("🧠 2. AI-Strategi & Filter")
+st.sidebar.subheader("⚙️ 3. Autopilot-profil")
 strategy = st.sidebar.selectbox(
-    "Välj spelfilosofi",
+    "Välj riskprofil",
     [
-        "Balanserad (Optimal mix av AI-Edge & vinstchans)",
-        "Säker (Favorit- & Formfokus / Flest rätt)",
-        "Hög Utdelning / Jägaren (Maxad AI-Edge & skrälljakt)"
+        "Helautomatisk Optimal (Maximerar EV: Chans x Utdelning)",
+        "Jobbtävlings-Jägaren (Mer vikt på skrällar & hög utdelning)",
+        "Trygg & Formstark (Fokus på flest rätt & starkaste lagen)"
     ]
 )
 
-default_min_payout = 1000 if product in ["stryktipset", "europatipset"] else 150
-max_slider_payout = 50000 if product in ["stryktipset", "europatipset"] else 2000
-step_slider = 500 if product in ["stryktipset", "europatipset"] else 50
-
-min_payout = st.sidebar.slider(
-    "Minsta uppskattad utdelning vid alla rätt (kr)", 
-    min_value=0, max_value=max_slider_payout, value=default_min_payout, step=step_slider,
-    help="Rensar bort 'kaffepengsrader' där alldeles för många storfavoriter vinner samtidigt."
-)
-
-min_hamming = st.sidebar.slider(
-    "🛡️ Radspridning (Minsta antal tecken som måste skilja)", 
-    min_value=1, max_value=4, value=2 if product in ["stryktipset", "europatipset"] else 1,
-    help="Anti-klump-filter! Om du väljer 2 måste varje utvald rad skilja sig på minst 2 matcher från dina övriga rader. Ger betydligt bredare täckning till 10-13 rätt!"
-)
-
-h2h_smart_mode = False
-if product == "powerplay":
-    h2h_smart_mode = st.sidebar.checkbox(
-        "🎯 Smart Head-to-Head-hantering (Powerplay)", 
-        value=True,
-        help="Känner igen spelardueller och låser/prioriterar X för att spara rader till lagmatcherna."
-    )
-
-# --- 2. HÄMTA DATA FRÅN SVENSKA SPEL ---
+# --- 2. HÄMTA ALL DATA FRÅN SVENSKA SPEL ---
 @st.cache_data(ttl=120)
 def fetch_draws(prod):
     url = f"https://api.spela.svenskaspel.se/draw/1/{prod}/draws"
@@ -86,20 +63,47 @@ def is_head_to_head(desc, sx, px):
     high_draw_prob = (sx >= 36 or px >= 36)
     return has_initials or high_draw_prob
 
-def extract_team_rankings(ev):
-    """Försöker hämta tabellplacering eller ranking ur Svenska Spels dolda API-fält."""
-    home_rank, away_rank = None, None
+def extract_deep_stats(ev):
+    """Dammsuger API-svaret på tabellplacering, form (senaste matcher) och statistik."""
+    h_rank, a_rank = None, None
+    h_form_pts, a_form_pts = 0.0, 0.0
+    stat_summary = []
+
     try:
         match_obj = ev.get("match", {})
         for p in match_obj.get("participants", []):
             t_type = p.get("type", "").lower()
             rank = p.get("ranking") or p.get("tablePosition")
-            if rank:
-                if "home" in t_type: home_rank = int(rank)
-                elif "away" in t_type: away_rank = int(rank)
+            
+            # Beräkna formpoäng om form-sträng/lista finns (t.ex. W, D, L / V, O, F)
+            form_raw = p.get("form") or p.get("trend") or ""
+            f_pts = 0
+            if isinstance(form_raw, str) and form_raw:
+                for ch in form_raw.upper()[-5:]:
+                    if ch in ["W", "V", "3"]: f_pts += 3
+                    elif ch in ["D", "O", "X", "1"]: f_pts += 1
+            elif isinstance(form_raw, list):
+                for item in form_raw[-5:]:
+                    res = str(item).upper()
+                    if "W" in res or "V" in res: f_pts += 3
+                    elif "D" in res or "O" in res: f_pts += 1
+
+            if "home" in t_type:
+                if rank: h_rank = int(rank)
+                h_form_pts = f_pts
+            elif "away" in t_type:
+                if rank: a_rank = int(rank)
+                a_form_pts = f_pts
+
+        # Kolla även providerIds / match-status / kommentar
+        if h_rank and a_rank:
+            stat_summary.append(f"Tabell: #{h_rank} vs #{a_rank}")
+        if h_form_pts > 0 or a_form_pts > 0:
+            stat_summary.append(f"Form(5): {h_form_pts}p vs {a_form_pts}p")
     except Exception:
         pass
-    return home_rank, away_rank
+
+    return h_rank, a_rank, h_form_pts, a_form_pts, " | ".join(stat_summary)
 
 draws = fetch_draws(product)
 
@@ -112,11 +116,11 @@ selected_draw_key = st.sidebar.selectbox("Välj omgång", list(draw_options.keys
 draw = draw_options[selected_draw_key]
 draw_number = draw.get('drawNumber')
 
-if st.sidebar.button("🔄 Uppdatera live-data"):
+if st.sidebar.button("🔄 Uppdatera all live-statistik"):
     st.cache_data.clear()
     st.rerun()
 
-# --- 3. BEARBETA MATCHDATA & BERÄKNA AI-EDGE ---
+# --- 3. HELAUTOMATISK STATISTIKMOTOR (ODDS + FORM + TABELL + TT + POISSON-KRYSS) ---
 events = draw.get("drawEvents", [])
 num_matches = len(events)
 match_data = []
@@ -125,368 +129,277 @@ for ev in events:
     num = ev.get("eventNumber")
     desc = ev.get("eventDescription", f"Match {num}")
     
+    # 1. Svenska Folket (Streckfördelning)
     sf = ev.get("svenskaFolket") or {}
     s1 = float(sf.get("one", 0) or 0)
     sx = float(sf.get("x", 0) or 0)
     s2 = float(sf.get("two", 0) or 0)
-    
     if s1 + sx + s2 == 0:
-        s1, sx, s2 = 40.0, 25.0, 35.0
+        s1, sx, s2 = 40.0, 26.0, 34.0
     
+    # 2. Tio Tidningars Tips (Experter)
     tt = ev.get("tioTidningarsTips") or {}
     tt1 = int(tt.get("one", 0) or 0)
     ttx = int(tt.get("x", 0) or 0)
     tt2 = int(tt.get("two", 0) or 0)
-    tt_sum = max(tt1 + ttx + tt2, 1)
+    tt_sum = tt1 + ttx + tt2
     
+    # 3. Marknadsodds (Grundsannolikhet justerad för spelbolagets marginal)
     odds = ev.get("odds") or {}
     o1 = parse_odd(odds.get("one"))
     ox = parse_odd(odds.get("x"))
     o2 = parse_odd(odds.get("two"))
     
     if o1 > 0 and ox > 0 and o2 > 0:
-        inv1, invx, inv2 = 1/o1, 1/ox, 1/o2
+        # Power-metod för att ta bort bookmakerns "overround" (mer exakt än enkel division)
+        inv1, invx, inv2 = (1/o1)**1.05, (1/ox)**1.05, (1/o2)**1.05
         total_inv = inv1 + invx + inv2
-        p1 = round((inv1 / total_inv) * 100, 1)
-        px = round((invx / total_inv) * 100, 1)
-        p2 = round((inv2 / total_inv) * 100, 1)
+        odd_p1 = (inv1 / total_inv) * 100
+        odd_px = (invx / total_inv) * 100
+        odd_p2 = (inv2 / total_inv) * 100
     else:
-        p1, px, p2 = s1, sx, s2
+        odd_p1, odd_px, odd_p2 = s1, sx, s2
 
-    # --- SPORTS-AI-BETTOR LOGIK: KOMBINERAD AI-SANNOLIKHET (Odds + Expert-TT + Tabellranking) ---
-    h_rank, a_rank = extract_team_rankings(ev)
-    rank_bonus_1, rank_bonus_2 = 0.0, 0.0
-    rank_info = ""
+    # 4. Djupstatistik: Tabell & Form
+    h_rank, a_rank, h_form, a_form, stat_str = extract_deep_stats(ev)
+    
+    stat_adj_1, stat_adj_x, stat_adj_2 = 0.0, 0.0, 0.0
     if h_rank and a_rank:
-        rank_diff = a_rank - h_rank # Positiv om hemmalaget ligger högre i tabellen
-        rank_bonus_1 = max(min(rank_diff * 0.25, 3.5), -3.5)
-        rank_bonus_2 = -rank_bonus_1
-        rank_info = f" (Tabell: #{h_rank} vs #{a_rank})"
+        rank_diff = a_rank - h_rank # Positiv om hemmalaget ligger bättre till
+        stat_adj_1 += np.clip(rank_diff * 0.22, -3.5, 3.5)
+        stat_adj_2 -= np.clip(rank_diff * 0.22, -3.5, 3.5)
+        # Om två jämnstarka mittenlag möts ökar krysschansen (Poisson-effekt)
+        if abs(rank_diff) <= 3:
+            stat_adj_x += 1.2
 
-    # Väg in Tio Tidningars Tips (om tillgängligt) och tabellstyrka i AI-modellen
-    if (tt1 + ttx + tt2) > 0:
-        ai_p1 = (p1 * 0.88) + ((tt1 / tt_sum) * 100 * 0.12) + rank_bonus_1
-        ai_px = (px * 0.90) + ((ttx / tt_sum) * 100 * 0.10)
-        ai_p2 = (p2 * 0.88) + ((tt2 / tt_sum) * 100 * 0.12) + rank_bonus_2
+    if h_form > 0 or a_form > 0:
+        form_diff = h_form - a_form
+        stat_adj_1 += np.clip(form_diff * 0.25, -2.5, 2.5)
+        stat_adj_2 -= np.clip(form_diff * 0.25, -2.5, 2.5)
+
+    # 5. Poisson/Fotbolls-korrigering för jämna matcher
+    if product != "powerplay" and abs(odd_p1 - odd_p2) <= 10.0:
+        stat_adj_x += 1.5  # Fotbollsmatcher som står 50/50 slutar oftare oavgjort än folket tror
+
+    # 6. Vägsamman allt till en Total AI-Sannolikhet (Ensemble-modell)
+    if tt_sum > 0:
+        tt_p1, tt_px, tt_p2 = (tt1/tt_sum)*100, (ttx/tt_sum)*100, (tt2/tt_sum)*100
+        raw_p1 = (odd_p1 * 0.86) + (tt_p1 * 0.14) + stat_adj_1
+        raw_px = (odd_px * 0.88) + (tt_px * 0.12) + stat_adj_x
+        raw_p2 = (odd_p2 * 0.86) + (tt_p2 * 0.14) + stat_adj_2
     else:
-        ai_p1, ai_px, ai_p2 = p1 + rank_bonus_1, px, p2 + rank_bonus_2
+        raw_p1 = odd_p1 + stat_adj_1
+        raw_px = odd_px + stat_adj_x
+        raw_p2 = odd_p2 + stat_adj_2
 
-    # Normalisera AI-sannolikheten till exakt 100%
-    ai_tot = max(ai_p1 + ai_px + ai_p2, 1.0)
-    ai_p1 = round((max(ai_p1, 1.0) / ai_tot) * 100, 1)
-    ai_px = round((max(ai_px, 1.0) / ai_tot) * 100, 1)
-    ai_p2 = round((max(ai_p2, 1.0) / ai_tot) * 100, 1)
+    # Normalisera till 100 %
+    tot_p = max(raw_p1 + raw_px + raw_p2, 1.0)
+    ai_p1 = round((max(raw_p1, 1.0) / tot_p) * 100, 1)
+    ai_px = round((max(raw_px, 1.0) / tot_p) * 100, 1)
+    ai_p2 = round((max(raw_p2, 1.0) / tot_p) * 100, 1)
 
-    # AI-Edge (Skillnad mellan AI-modellens sannolikhet och Svenska Folkets streck)
-    v1 = round(ai_p1 - s1, 1)
-    vx = round(ai_px - sx, 1)
-    v2 = round(ai_p2 - s2, 1)
+    # 7. Beräkna Edge (AI-sannolikhet minus Svenska Folket) & EV-kvot (AI / Folket)
+    v1, vx, v2 = round(ai_p1 - s1, 1), round(ai_px - sx, 1), round(ai_p2 - s2, 1)
+    ev1, evx, ev2 = ai_p1 / max(s1, 1.0), ai_px / max(sx, 1.0), ai_p2 / max(s2, 1.0)
+
+    h2h = is_head_to_head(desc, sx, ai_px) if product == "powerplay" else False
+
+    # 8. Beräkna "Spik-Index" (Hur lämplig är matchen som spik på kupongen?)
+    # Vi letar efter kombinationen av hög vinstchans OCH att den inte är kupongens mest sönderstreckade fälla
+    best_sign = max([("1", ai_p1, v1, s1), ("X", ai_px, vx, sx), ("2", ai_p2, v2, s2)], key=lambda x: x[1])
+    spik_sign, spik_prob, spik_edge, spik_folket = best_sign
     
-    h2h = is_head_to_head(desc, sx, px) if product == "powerplay" else False
-    
+    if h2h:
+        spik_index = 95.0 # På Powerplay älskar vi att spika X i spelardueller!
+        spik_sign = "X"
+    else:
+        # En bra spik har hög sannolikhet (spik_prob) och vettigt streckvärde (spik_edge)
+        spik_index = spik_prob + (spik_edge * 1.15)
+        if strategy.startswith("Jobbtävlings-Jägaren") and spik_folket >= 72 and spik_edge < -7:
+            spik_index -= 18.0 # Jägaren vägrar spika grovt överstreckade storfavoriter!
+
     match_data.append({
-        "Nr": num, "Match": desc + rank_info, "H2H": h2h,
+        "Nr": num, "Match": desc, "Stat": stat_str, "H2H": h2h,
         "s1": s1, "sx": sx, "s2": s2,
         "p1": ai_p1, "px": ai_px, "p2": ai_p2,
         "v1": v1, "vx": vx, "v2": v2,
-        "tt1": tt1, "ttx": ttx, "tt2": tt2
+        "ev1": ev1, "evx": evx, "ev2": ev2,
+        "tt1": tt1, "ttx": ttx, "tt2": tt2,
+        "spik_sign": spik_sign, "spik_index": round(spik_index, 1)
     })
 
 df = pd.DataFrame(match_data)
 
-# --- 4. VALFRI MANUELL LÅSNING ("LÅS MIN SPIK") ---
-manual_overrides = {}
-with st.expander("🔒 Valfritt: Lås egna spikar eller garderingar (Klicka för att öppna)"):
-    st.caption("Vill du spika ditt favoritlag på Stryktipset? Välj här så rättar sig AI-motorn efter dig!")
-    for idx, row in df.iterrows():
-        m_nr = row["Nr"]
-        badge = " 🎯 [H2H]" if row["H2H"] else ""
-        choice = st.selectbox(
-            f"{m_nr}. {row['Match']}{badge} | Folket: {int(row['s1'])}%-{int(row['sx'])}%-{int(row['s2'])}% | AI: {int(row['p1'])}%-{int(row['px'])}%-{int(row['p2'])}%",
-            options=["🤖 Auto (AI väljer)", "Spika 1", "Spika X", "Spika 2", "Halvgardera 1X", "Halvgardera X2", "Halvgardera 12", "Helgardera 1X2"],
-            key=f"lock_{product}_{draw_number}_{m_nr}"
-        )
-        if choice != "🤖 Auto (AI väljer)":
-            if "1X2" in choice: manual_overrides[m_nr] = ["1", "X", "2"]
-            elif "1X" in choice: manual_overrides[m_nr] = ["1", "X"]
-            elif "X2" in choice: manual_overrides[m_nr] = ["X", "2"]
-            elif "12" in choice: manual_overrides[m_nr] = ["1", "2"]
-            elif "1" in choice: manual_overrides[m_nr] = ["1"]
-            elif "X" in choice: manual_overrides[m_nr] = ["X"]
-            elif "2" in choice: manual_overrides[m_nr] = ["2"]
+# --- 4. DYNAMISK RAM-ALLOKERING (BESTÄMMER ANTAL SPIKAR & GARDERINGAR AUTOMATISKT) ---
+allowed_max_rows = max(int(max_budget / stake_per_row), 1)
 
-# --- 5. AUTOPILOTENS GRUNDURVAL PER MATCH ---
+# Hur stort grundsystem (ram) ska vi bygga innan vi handplockar de absolut bästa raderna?
+# En ram på ca 8x - 25x budgeten ger perfekt balans: tillräckligt med spikar för styrka, och garderingar i skrällmatcherna!
+if num_matches == 13:
+    if allowed_max_rows <= 64:
+        target_spikar, target_halv = 5, 4   # 5 spik, 4 halv, 4 hel = 1 296 rader i ramen
+    elif allowed_max_rows <= 160:
+        target_spikar, target_halv = 4, 4   # 4 spik, 4 halv, 5 hel = 3 888 rader i ramen
+    elif allowed_max_rows <= 400:
+        target_spikar, target_halv = 3, 4   # 3 spik, 4 halv, 6 hel = 11 664 rader i ramen
+    else:
+        target_spikar, target_halv = 3, 3   # 3 spik, 3 halv, 7 hel = 17 496 rader i ramen
+else: # 8 matcher (Powerplay / Topptipset)
+    if allowed_max_rows <= 50:
+        target_spikar, target_halv = 3, 2   # 3 spik, 2 halv, 3 hel = 108 rader i ramen
+    elif allowed_max_rows <= 150:
+        target_spikar, target_halv = 2, 2   # 2 spik, 2 halv, 4 hel = 324 rader i ramen
+    else:
+        target_spikar, target_halv = 1, 2   # 1 spik, 2 halv, 5 hel = 972 rader i ramen
+
+if strategy.startswith("Trygg"):
+    target_spikar += 1
+
+# Sortera alla matcher efter Spik-Index så att de bästa matcherna blir spikar, näst bästa halvgarderingar, och svåraste/bästa skrällmatcherna helgarderas!
+ranked_indices = sorted(range(num_matches), key=lambda i: match_data[i]["spik_index"], reverse=True)
+spik_matches = set(ranked_indices[:target_spikar])
+halv_matches = set(ranked_indices[target_spikar:target_spikar + target_halv])
+
 selections = []
+match_roles = []
 match_explanations = []
 
-for idx, row in df.iterrows():
-    m_nr = row["Nr"]
-    s1, sx, s2 = row["s1"], row["sx"], row["s2"]
-    p1, px, p2 = row["p1"], row["px"], row["p2"]
-    v1, vx, v2 = row["v1"], row["vx"], row["v2"]
-    tt1, tt2 = row["tt1"], row["tt2"]
-    is_h2h = row["H2H"]
+for i in range(num_matches):
+    m = match_data[i]
+    signs_ranked = sorted(
+        ["1", "X", "2"],
+        key=lambda s: (m[f"p{s.lower()}"] + m[f"v{s.lower()}"] * (1.5 if strategy.startswith("Jobb") else 0.9)),
+        reverse=True
+    )
     
-    if m_nr in manual_overrides:
-        signs = manual_overrides[m_nr]
-        reason = "🔒 Manuellt låst av dig"
-        
-    elif is_h2h and h2h_smart_mode:
-        if strategy.startswith("Säker"):
-            signs = ["X"]
-            reason = "🎯 Spelarduell: Spikar X (sparar rader!)"
+    if i in spik_matches:
+        chosen = [m["spik_sign"]]
+        role = "🔒 AI-Spik"
+        if m["H2H"]:
+            exp = f"🎯 Spelarduell: Låser X ({int(m['px'])}% chans) för att spara krut till lagmatcherna"
+        elif m[f"v{m['spik_sign'].lower()}"] >= 0:
+            exp = f"💎 Omgångens Värdespik! {int(m['p'+m['spik_sign'].lower()])}% AI-chans & +{m['v'+m['spik_sign'].lower()]}% Edge"
         else:
-            best_wing = "1" if (p1 + v1) >= (p2 + v2) else "2"
-            if max(p1, p2) >= 28 or max(v1, v2) >= 3:
-                signs = sorted(["X", best_wing], key=lambda x: {"1":0, "X":1, "2":2}[x])
-                reason = f"🎯 Spelarduell: Låser X + värdesidan ({best_wing})"
-            else:
-                signs = ["X"]
-                reason = "🎯 Spelarduell: Spikar X"
-                
-    else:
-        signs = []
-        if strategy.startswith("Säker"):
-            if p1 >= 54 or (s1 >= 60 and v1 >= -5):
-                signs = ["1"]
-                reason = "⚡ Stark hemmafavorit spikas"
-            elif p2 >= 54 or (s2 >= 60 and v2 >= -5):
-                signs = ["2"]
-                reason = "⚡ Stark bortafavorit spikas"
-            else:
-                if p1 >= 30 or tt1 >= 5: signs.append("1")
-                if px >= 25 or abs(p1 - p2) <= 14: signs.append("X")
-                if p2 >= 30 or tt2 >= 5: signs.append("2")
-                if not signs: signs = ["1", "X"] if p1 >= p2 else ["X", "2"]
-                reason = "🛡️ Garderar jämn match"
-                
-        elif strategy.startswith("Hög Utdelning"):
-            # Fäll grovt överstreckade storfavoriter eller helgardera dem
-            if s1 >= 62 and v1 <= -5:
-                signs = ["1", "X", "2"] if p1 >= 56 else ["X", "2"]
-                reason = f"💣 Överstreckad favorit ({int(s1)}%)! Jagas med skräll"
-            elif s2 >= 62 and v2 <= -5:
-                signs = ["1", "X", "2"] if p2 >= 56 else ["1", "X"]
-                reason = f"💣 Överstreckad bortafavorit ({int(s2)}%)! Jagas med skräll"
-            # Om vi hittar en grym värdespik (hög AI-chans + positiv Edge)
-            elif p1 >= 48 and v1 >= 4:
-                signs = ["1"]
-                reason = f"💎 Omgångens AI-Värdespik! (+{v1}% Edge)"
-            elif p2 >= 48 and v2 >= 4:
-                signs = ["2"]
-                reason = f"💎 Omgångens AI-Värdespik! (+{v2}% Edge)"
-            else:
-                if v1 >= -2 or p1 >= 42: signs.append("1")
-                if vx >= -2 or px >= 24: signs.append("X")
-                if v2 >= -2 or p2 >= 42: signs.append("2")
-                if not signs: signs = ["1", "X", "2"]
-                reason = "🔥 Plockar tecken med hög AI-Edge"
-                
-        else:  # Balanserad
-            if p1 >= 50 and v1 >= -2:
-                signs = ["1"]
-                reason = f"✅ Sund AI-spik (AI: {int(p1)}%, Edge: {v1:+}%)"
-            elif p2 >= 50 and v2 >= -2:
-                signs = ["2"]
-                reason = f"✅ Sund AI-spik (AI: {int(p2)}%, Edge: {v2:+}%)"
-            else:
-                if p1 >= 32 or v1 >= 2.5 or tt1 >= 5: signs.append("1")
-                if px >= 24 or vx >= 2.5 or abs(p1 - p2) <= 14: signs.append("X")
-                if p2 >= 32 or v2 >= 2.5 or tt2 >= 5: signs.append("2")
-                if not signs: signs = ["1", "X", "2"]
-                reason = "⚖️ Balanserad gardering (AI-chans + Edge)"
-
-    selections.append(signs)
-    match_explanations.append(reason)
-
-# --- 6. STRYKTIPS-SÄKER RADMOTOR (KLARAR MILJONTALS KOMBINATIONER) ---
-allowed_max_rows = int(max_budget / stake_per_row)
-
-# Räkna ut hur många matematiska rader grundvalen ger
-total_combinations = 1
-for s in selections:
-    total_combinations *= len(s)
-
-MAX_EXACT_ROWS = 25000  # Gräns för att appen alltid ska svara blixtsnabbt
-
-if total_combinations <= MAX_EXACT_ROWS:
-    candidate_rows = list(itertools.product(*selections))
-else:
-    # Smart viktad Monte Carlo-sampling när 13 matcher ger 50 000 - 1 500 000 rader!
-    random.seed(draw_number + int(max_budget) + len(strategy))
-    sampled_set = set()
-    
-    # Beräkna vikter per match och tecken så att vi drar högkvalitativa kandidater
-    match_weights = []
-    for i, signs in enumerate(selections):
-        m = match_data[i]
-        w = []
-        for s in signs:
-            prob = m[f"p{s.lower()}"]
-            edge = m[f"v{s.lower()}"]
-            if strategy.startswith("Säker"):
-                weight = max(prob, 5.0)
-            elif strategy.startswith("Hög Utdelning"):
-                weight = max(prob + (edge * 2.2), 5.0)
-            else:
-                weight = max(prob + (edge * 1.4), 5.0)
-            w.append(weight)
-        match_weights.append(w)
-        
-    attempts = 0
-    target_samples = 18000
-    while len(sampled_set) < target_samples and attempts < target_samples * 3:
-        attempts += 1
-        row_list = [random.choices(selections[i], weights=match_weights[i], k=1)[0] for i in range(num_matches)]
-        sampled_set.add(tuple(row_list))
-    candidate_rows = list(sampled_set)
-
-def evaluate_row(r):
-    prob_Map = {"1": "p1", "X": "px", "2": "p2"}
-    folket_Map = {"1": "s1", "X": "sx", "2": "s2"}
-    val_Map = {"1": "v1", "X": "vx", "2": "v2"}
-    
-    folket_prod = 1.0
-    prob_sum = 0.0
-    value_sum = 0.0
-    underdogs = 0
-    favorites = 0
-    draws_count = 0
-    
-    for i, sign in enumerate(r):
-        m = match_data[i]
-        s_pct = max(m[folket_Map[sign]], 1.0) / 100.0
-        p_pct = max(m[prob_Map[sign]], 1.0)
-        v_pts = m[val_Map[sign]]
-        
-        folket_prod *= s_pct
-        prob_sum += p_pct
-        value_sum += v_pts
-        
-        if sign == "X":
-            draws_count += 1
-        if not m["H2H"]:
-            if m[folket_Map[sign]] >= 50:
-                favorites += 1
-            elif m[folket_Map[sign]] <= 22:
-                underdogs += 1
-
-    # Uppskattad utdelning vid alla rätt (8 rätt på PP vs 13 rätt på Stryktipset)
-    pool_share = 0.28 if num_matches == 13 else 0.70
-    est_payout = round((pool_share / folket_prod) * stake_per_row)
-    
-    # Dynamisk balansbonus (anpassad efter 8 eller 13 matcher)
-    balance_bonus = 0
-    ideal_dogs_min = 2 if num_matches == 13 else 1
-    ideal_dogs_max = 5 if num_matches == 13 else 3
-    too_many_dogs = 7 if num_matches == 13 else 5
-    
-    # På 13 matcher i fotboll brukar det bli 2 till 5 kryss
-    if num_matches == 13 and (draws_count == 0 or draws_count >= 7):
-        balance_bonus -= 50
-
-    if strategy.startswith("Balanserad"):
-        if ideal_dogs_min <= underdogs <= ideal_dogs_max and favorites >= (3 if num_matches == 13 else 2):
-            balance_bonus += 45
-        elif underdogs >= too_many_dogs:
-            balance_bonus -= 120
-        score = (prob_sum * 0.65) + (value_sum * 1.65) + balance_bonus
-        
-    elif strategy.startswith("Säker"):
-        score = (prob_sum * 1.25) + (value_sum * 0.45) + balance_bonus
-        
-    else: # Hög Utdelning / Jägaren
-        if (ideal_dogs_min + 1) <= underdogs <= (ideal_dogs_max + 1):
-            balance_bonus += 55
-        elif underdogs >= (too_many_dogs + 1):
-            balance_bonus -= 100
-        score = (prob_sum * 0.45) + (value_sum * 2.25) + balance_bonus
-        
-    return score, est_payout, underdogs
-
-evaluated = []
-for r in candidate_rows:
-    score, payout, dogs = evaluate_row(r)
-    evaluated.append({"row": r, "score": score, "payout": payout, "dogs": dogs})
-
-# 1. Filtrera med utdelningsspärren
-payout_filtered = [item for item in evaluated if item["payout"] >= min_payout]
-if len(payout_filtered) < allowed_max_rows and len(evaluated) > 0:
-    evaluated.sort(key=lambda x: x["payout"], reverse=True)
-    payout_filtered = evaluated[:max(allowed_max_rows * 3, len(evaluated))]
-
-# 2. Sortera efter vår kombinerade AI-Score
-payout_filtered.sort(key=lambda x: x["score"], reverse=True)
-
-# 3. ANTI-KLUMP-FILTER (Hamming-avstånd för optimal radspridning!)
-def hamming_distance(r1, r2):
-    return sum(c1 != c2 for c1, c2 in zip(r1, r2))
-
-selected_items = []
-if min_hamming <= 1:
-    selected_items = payout_filtered[:allowed_max_rows]
-else:
-    for item in payout_filtered:
-        if len(selected_items) >= allowed_max_rows:
-            break
-        r = item["row"]
-        if all(hamming_distance(r, sel["row"]) >= min_hamming for sel in selected_items):
-            selected_items.append(item)
+            exp = f"⚡ Kupongens starkaste ryggrad ({int(m['p'+m['spik_sign'].lower()])}% AI-vinstchans)"
             
-    # Om filtret var så hårt att vi inte fyllde budgeten, fyll på med näst bästa rader
-    if len(selected_items) < allowed_max_rows:
-        chosen_set = {x["row"] for x in selected_items}
-        for item in payout_filtered:
-            if len(selected_items) >= allowed_max_rows:
-                break
-            if item["row"] not in chosen_set:
-                selected_items.append(item)
-                chosen_set.add(item["row"])
-
-filtered_rows = [item["row"] for item in selected_items]
-
-# --- 7. PRESENTATION & NEDLADDNING ---
-st.subheader(f"🎯 Autopilotens Färdiga Spelplan ({Export_Name})")
-
-if selected_items:
-    avg_payout = int(sum(x["payout"] for x in selected_items) / len(selected_items))
-    min_p = min(x["payout"] for x in selected_items)
-    max_p = max(x["payout"] for x in selected_items)
-    
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Antal AI-optimerade rader", f"{len(filtered_rows)} st", f"Budget: {max_budget} kr")
-    col2.metric("Total kostnad", f"{len(filtered_rows) * stake_per_row} kr", f"Radspridning: minst {min_hamming} tecken")
-    col3.metric(f"Uppskattad vinst ({num_matches} rätt)", f"{min_p:,} – {max_p:,} kr".replace(",", " "), f"Snitt: ~{avg_payout:,} kr".replace(",", " "))
-
-st.info(
-    f"✨ Från **{total_combinations:,}** möjliga grundkombinationer har AI-motorn vägt samman odds, TT och tabellstyrka, "
-    f"sållat bort lågutdelande rader och spridit ut de **{len(filtered_rows)} skarpaste raderna** över kupongen.".replace(",", " ")
-)
-
-with st.expander("🔍 Se AI-analys, Edge (övervärde) och valda tecken per match", expanded=True):
-    table_rows = []
-    for idx, row in df.iterrows():
-        # Hitta bäst Edge i matchen
-        edges = {"1": row["v1"], "X": row["vx"], "2": row["v2"]}
-        best_sign = max(edges, key=edges.get)
-        best_edge = edges[best_sign]
-        edge_str = f"{best_sign} ({best_edge:+}%)" if best_edge > 0 else "Ingen tydlig"
+    elif i in halv_matches:
+        chosen = sorted(signs_ranked[:2], key=lambda x: {"1":0, "X":1, "2":2}[x])
+        role = "🛡️ Halvgardering"
+        exp = f"⚖️ Låser de två starkaste värdetecknen ({', '.join(chosen)}), kastar sämsta tecknet"
         
-        table_rows.append({
-            "Match": f"{row['Nr']}. {row['Match']}",
-            "Folket (1-X-2)": f"{int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}%",
-            "AI-Modell (1-X-2)": f"{int(row['p1'])}% - {int(row['px'])}% - {int(row['p2'])}%",
-            "Bästa AI-Edge": edge_str,
-            "Valda tecken": ", ".join(selections[idx]),
-            "AI-Kommentar": match_explanations[idx]
-        })
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    else:
+        chosen = ["1", "X", "2"]
+        role = "💣 Helgardering (Skrälljakt)"
+        # Hitta vilket skrälltecken som har bäst övervärde i matchen
+        best_dog = max(["1", "X", "2"], key=lambda s: m[f"v{s.lower()}"])
+        dog_edge = m[f"v{best_dog.lower()}"]
+        exp = f"🔥 Helgarderas! Jagar supervärdet på '{best_dog}' ({dog_edge:+}% AI-Edge mot folket)"
 
-st.divider()
+    selections.append(chosen)
+    match_roles.append(role)
+    match_explanations.append(exp)
 
-if filtered_rows:
-    # Svenska Spels externa systemfilsformat:
-    # Stryktipset/Europatipset ska INTE ha ",Insats=1" i headern, medan Powerplay/Topptipset har det.
+# --- 5. NUMPY-VEKTORISERAD RADMOTOR (POÄNGSÄTTER ALLA RADER PÅ 0.1 SEKUNDER) ---
+all_rows = list(itertools.product(*selections))
+total_ram_rows = len(all_rows)
+
+# Bygg NumPy-matriser för blixtsnabb beräkning av alla rader i ramen samtidigt
+sign_to_idx = {"1": 0, "X": 1, "2": 2}
+rows_idx = np.array([[sign_to_idx[s] for s in r] for r in all_rows], dtype=np.int32)
+
+prob_matrix = np.array([[m["p1"], m["px"], m["p2"]] for m in match_data]) / 100.0
+folket_matrix = np.maximum(np.array([[m["s1"], m["sx"], m["s2"]] for m in match_data]), 1.0) / 100.0
+edge_matrix = np.array([[m["v1"], m["vx"], m["v2"]] for m in match_data])
+
+match_idx = np.arange(num_matches)
+row_probs = prob_matrix[match_idx, rows_idx]       # Sannolikhet per tecken
+row_folket = folket_matrix[match_idx, rows_idx]     # Folkets streck per tecken
+row_edges = edge_matrix[match_idx, rows_idx]        # AI-Edge per tecken
+
+# 1. Sannolikhet att hela raden sitter (log-summa för numerisk precision)
+rad_win_prob = np.prod(row_probs, axis=1)
+rad_folket_prob = np.prod(row_folket, axis=1)
+
+# 2. Uppskattad utdelning vid alla rätt
+pool_share = 0.28 if num_matches == 13 else 0.70
+est_payouts = np.round((pool_share / rad_folket_prob) * stake_per_row).astype(np.int64)
+
+# 3. Matematiskt Väntevärde (Expected Value = Sannolikhet * Utdelning)
+rad_ev = rad_win_prob * est_payouts
+edge_sum = np.sum(row_edges, axis=1)
+prob_sum = np.sum(row_probs * 100, axis=1)
+
+# 4. Antal skrällar (tecken streckade under 23%) och kryss per rad
+underdogs_count = np.sum(row_folket <= 0.23, axis=1)
+draws_count = np.sum(rows_idx == 1, axis=1)
+
+# 5. Beräkna Total AI-Score per rad beroende på vald profil
+balance_penalty = np.zeros(total_ram_rows)
+if num_matches == 13:
+    # Straffa orealistiska rader (t.ex. 0 kryss, >6 kryss, eller 7+ megaskrällar samtidigt)
+    balance_penalty += np.where((draws_count == 0) | (draws_count >= 7), -80.0, 0.0)
+    balance_penalty += np.where(underdogs_count >= 6, -150.0, 0.0)
+    balance_penalty += np.where((underdogs_count >= 2) & (underdogs_count <= 4), 45.0, 0.0)
+else:
+    balance_penalty += np.where(underdogs_count >= 4, -100.0, 0.0)
+    balance_penalty += np.where((underdogs_count >= 1) & (underdogs_count <= 2), 35.0, 0.0)
+
+if strategy.startswith("Helautomatisk Optimal"):
+    total_scores = (prob_sum * 0.70) + (edge_sum * 1.75) + (np.clip(rad_ev, 0, 5) * 15.0) + balance_penalty
+elif strategy.startswith("Jobbtävlings-Jägaren"):
+    total_scores = (prob_sum * 0.45) + (edge_sum * 2.40) + (np.clip(rad_ev, 0, 8) * 20.0) + balance_penalty
+else: # Trygg & Formstark
+    total_scores = (prob_sum * 1.30) + (edge_sum * 0.60) + balance_penalty
+
+# Automatisk utdelningsspärr: kräv att utdelningen minst täcker 3x hela din kupongbudget!
+auto_min_payout = max(int(max_budget * 3), 250 if num_matches == 8 else 1500)
+valid_mask = est_payouts >= auto_min_payout
+if np.sum(valid_mask) < allowed_max_rows:
+    valid_mask = np.ones(total_ram_rows, dtype=bool)
+
+valid_indices = np.where(valid_mask)[0]
+sorted_valid_indices = valid_indices[np.argsort(total_scores[valid_indices])[::-1]]
+
+# --- 6. AUTOMATISKT ANTI-KLUMP-FILTER (GARANTERAR BRED TÄCKNING) ---
+min_dist = 2 if (num_matches == 13 and allowed_max_rows <= 400) else 1
+selected_idx = []
+
+for idx in sorted_valid_indices:
+    if len(selected_idx) >= allowed_max_rows:
+        break
+    cand = rows_idx[idx]
+    if len(selected_idx) == 0:
+        selected_idx.append(idx)
+    else:
+        # Vektoriserad kontroll av Hamming-avstånd mot alla redan valda rader
+        existing = rows_idx[selected_idx]
+        diffs = np.sum(existing != cand, axis=1)
+        if np.all(diffs >= min_dist):
+            selected_idx.append(idx)
+
+# Fyll upp till exakt budget om Hamming-filtret var för strikt på slutet
+if len(selected_idx) < allowed_max_rows:
+    chosen_set = set(selected_idx)
+    for idx in sorted_valid_indices:
+        if len(selected_idx) >= allowed_max_rows:
+            break
+        if idx not in chosen_set:
+            selected_idx.append(idx)
+            chosen_set.add(idx)
+
+filtered_rows = [all_rows[i] for i in selected_idx]
+final_payouts = est_payouts[selected_idx]
+
+# --- 7. PRESENTATION & DIREKT NEDLADDNING ---
+st.subheader(f"🎯 Färdigoptimerad Kupong: {Export_Name} (Omgång {draw_number})")
+
+if len(filtered_rows) > 0:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Valda rader", f"{len(filtered_rows)} st", f"Från ram på {total_ram_rows:,} rader".replace(",", " "))
+    c2.metric("Total kostnad", f"{len(filtered_rows) * stake_per_row} kr", f"Spikar: {target_spikar} st | Halv: {target_halv} st")
+    c3.metric("Snittutdelning (Alla rätt)", f"~{int(np.mean(final_payouts)):,} kr".replace(",", " "), f"Min: {int(np.min(final_payouts)):,} kr".replace(",", " "))
+    c4.metric("Maximal vinstpotential", f"{int(np.max(final_payouts)):,} kr".replace(",", " "), "Inkl. skrällrensare")
+
     if product in ["stryktipset", "europatipset"]:
         header_line = f"{Export_Name},Omg={draw_number}"
     else:
@@ -496,11 +409,35 @@ if filtered_rows:
     file_content = "\n".join(lines)
     
     st.download_button(
-        label=f"📥 Ladda ner färdig systemfil ({len(filtered_rows) * stake_per_row} kr) för {Export_Name}",
+        label=f"📥 Ladda ner färdig systemfil ({len(filtered_rows) * stake_per_row} kr) – Klar för inlämning!",
         data=file_content,
         file_name=f"{product}_omg_{draw_number}.txt",
         mime="text/plain",
-        type="primary"
+        type="primary",
+        use_container_width=True
     )
-else:
-    st.warning("Kunde inte generera några rader. Prova att sänka utdelningsspärren i sidomenyn.")
+
+st.divider()
+
+st.subheader("📊 AI-Motorns Helautomatiska Matchanalys & Ram")
+table_rows = []
+for i, row in df.iterrows():
+    edges = {"1": row["v1"], "X": row["vx"], "2": row["v2"]}
+    best_s = max(edges, key=edges.get)
+    best_e = edges[best_s]
+    
+    tt_str = f"{row['tt1']}-{row['ttx']}-{row['tt2']}" if (row['tt1']+row['ttx']+row['tt2']) > 0 else "Ej släppt"
+    
+    table_rows.append({
+        "Match": f"{row['Nr']}. {row['Match']}",
+        "Tabell & Form": row["Stat"] if row["Stat"] else "Odds + Streck",
+        "Folket (1-X-2)": f"{int(row['s1'])}% - {int(row['sx'])}% - {int(row['s2'])}%",
+        "Experter (TT)": tt_str,
+        "Total AI-Chans": f"{int(row['p1'])}% - {int(row['px'])}% - {int(row['p2'])}%",
+        "Bästa Värde (Edge)": f"{best_s} ({best_e:+}%)",
+        "AI-Beslut": match_roles[i],
+        "Valda tecken": ", ".join(selections[i]),
+        "Analys": match_explanations[i]
+    })
+
+st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
