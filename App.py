@@ -33,7 +33,7 @@ strategy = st.sidebar.selectbox(
     [
         "Trygg & Säker (Maximerar chans till 8/13 rätt + X-skydd)",
         "Helautomatisk Optimal (Balanserar chans & utdelning)",
-        "Jobbtävlings-Jägaren (Högre skrällfokus)"
+        "Jobbtävlings-Jägaren (Fäller överstreckade favoriter & jagar miljonen)"
     ]
 )
 
@@ -69,6 +69,7 @@ def calc_form_pts(form_raw):
 
 def extract_deep_stats(ev, extra_ev_stat):
     h_rank, a_rank, h_form, a_form = None, None, 0.0, 0.0
+    stat_parts = []
     try:
         for p in ev.get("match", {}).get("participants", []):
             t = p.get("type", "").lower()
@@ -80,9 +81,15 @@ def extract_deep_stats(ev, extra_ev_stat):
             for row in (extra_ev_stat.get("standings") or extra_ev_stat.get("table") or []):
                 if row.get("isHomeTeam") or row.get("teamType") == "home": h_rank = h_rank or row.get("position")
                 elif row.get("isAwayTeam") or row.get("teamType") == "away": a_rank = a_rank or row.get("position")
+            hf = extra_ev_stat.get("homeForm") or extra_ev_stat.get("formHome")
+            af = extra_ev_stat.get("awayForm") or extra_ev_stat.get("formAway")
+            if hf and not h_form: h_form = calc_form_pts(hf)
+            if af and not a_form: a_form = calc_form_pts(af)
+        if h_rank and a_rank: stat_parts.append(f"Tabell: #{h_rank} vs #{a_rank}")
+        if h_form > 0 or a_form > 0: stat_parts.append(f"Form: {int(h_form)}p-{int(a_form)}p")
     except Exception:
         pass
-    return h_rank, a_rank, h_form, a_form, f"Tabell: #{h_rank} vs #{a_rank}" if h_rank and a_rank else ""
+    return h_rank, a_rank, h_form, a_form, " | ".join(stat_parts)
 
 draws = fetch_draws(product)
 if not draws:
@@ -101,7 +108,9 @@ extra_map = {ev.get("eventNumber"): ev for ev in draw.get("_extra_stats", {}).ge
 events = draw.get("drawEvents", [])
 num_matches = len(events)
 match_data = []
+
 is_safe_mode = strategy.startswith("Trygg")
+is_hunter_mode = strategy.startswith("Jobb")
 
 for ev in events:
     num = ev.get("eventNumber")
@@ -128,10 +137,16 @@ for ev in events:
     h2h = bool(re.search(r"\b[A-ZÅÄÖ]\.", desc) or sx >= 36 or px >= 36) if product == "powerplay" else False
     h_r, a_r, h_f, a_f, stat_str = extract_deep_stats(ev, ex)
     
-    adj1 = np.clip((a_r - h_r) * 0.22, -3.5, 3.5) if (h_r and a_r and not h2h) else 0.0
+    # FIX 1: Nu vägs både Tabell OCH Formkurva in i justeringen!
+    rank_adj = np.clip((a_r - h_r) * 0.22, -3.5, 3.5) if (h_r and a_r and not h2h) else 0.0
+    form_adj = np.clip((h_f - a_f) * 0.25, -2.5, 2.5) if ((h_f > 0 or a_f > 0) and not h2h) else 0.0
+    adj1 = float(rank_adj + form_adj)
     adj2 = -adj1
-    # I jämna hockeymatcher boostar vi X-chansen något (övertids-effekten i SHL/HA)
-    adgx = 2.0 if (product == "powerplay" and not h2h and abs(p1 - p2) <= 12) else 0.0
+    
+    # FIX 4a: Kryss-boost i jämna matcher (både hockey-övertid och jämna fotbollsmatcher)
+    adgx = 0.0
+    if not h2h and abs(p1 - p2) <= 11.0:
+        adgx = 2.0 if product == "powerplay" else 1.5
 
     if tt_sum > 0:
         raw_p1 = (p1 * 0.86) + ((tt1/tt_sum)*14) + adj1
@@ -144,14 +159,20 @@ for ev in events:
     ai_p1, ai_px, ai_p2 = round((raw_p1/tot)*100, 1), round((raw_px/tot)*100, 1), round((raw_p2/tot)*100, 1)
     v1, vx, v2 = round(ai_p1 - s1, 1), round(ai_px - sx, 1), round(ai_p2 - s2, 1)
     
-    spik_sign, spik_prob, spik_edge = max([("1", ai_p1, v1), ("X", ai_px, vx), ("2", ai_p2, v2)], key=lambda x: x[1])
+    cands = [("1", ai_p1, v1, s1), ("X", ai_px, vx, sx), ("2", ai_p2, v2, s2)]
     
-    # I säkert läge väger ren vinstchans (spik_prob) betydligt tyngre än streckvärde!
-    edge_weight = 0.35 if is_safe_mode else 1.10
     if h2h:
         spik_sign = "X"
         spik_idx = 65.0 + ai_px
+    elif is_hunter_mode:
+        viable = [c for c in cands if c[1] >= 35.0] or cands
+        spik_sign, spik_prob, spik_edge, spik_folk = max(viable, key=lambda x: x[1] + (x[2] * 1.8))
+        spik_idx = spik_prob + (spik_edge * 1.8)
+        if spik_folk >= 60.0 and spik_edge <= -5.0:
+            spik_idx -= 25.0
     else:
+        spik_sign, spik_prob, spik_edge, spik_folk = max(cands, key=lambda x: x[1])
+        edge_weight = 0.35 if is_safe_mode else 1.15
         spik_idx = spik_prob + (spik_edge * edge_weight)
 
     match_data.append({
@@ -167,10 +188,13 @@ allowed_max_rows = max(int(max_budget / stake_per_row), 1)
 if num_matches == 13:
     t_spik, t_halv = (5, 4) if allowed_max_rows <= 64 else ((4, 4) if allowed_max_rows <= 160 else (3, 4))
 else:
-    # På Powerplay anpassas ramen så att du har råd med fler garderingar i lagmatcherna
     if allowed_max_rows <= 48: t_spik, t_halv = 3, 2
     elif allowed_max_rows <= 160: t_spik, t_halv = 2, 3
     else: t_spik, t_halv = 1, 3
+
+# FIX 2: Trygg & Säker får en extra spik så att ramen blir tätare och säkrare!
+if is_safe_mode and t_spik < (6 if num_matches == 13 else 4):
+    t_spik += 1
 
 ranked = sorted(range(num_matches), key=lambda i: match_data[i]["spik_index"], reverse=True)
 spik_m, halv_m = set(ranked[:t_spik]), set(ranked[t_spik:t_spik + t_halv])
@@ -181,21 +205,36 @@ for i in range(num_matches):
     if i in spik_m:
         s_sign = m["spik_sign"]
         selections.append([s_sign])
-        roles.append("🔒 Säker Spik" if is_safe_mode else "🔒 AI-Spik")
-        expl.append(f"🎯 H2H-Spik X ({int(m['px'])}%)" if m["H2H"] else f"⚡ Starkaste spiken: {s_sign} ({int(m['p'+s_sign.lower()])}% chans)")
+        s_prob = int(m['p'+s_sign.lower()])
+        s_edge = m['v'+s_sign.lower()]
+        if m["H2H"]:
+            roles.append("🔒 H2H-Spik")
+            expl.append(f"🎯 H2H-Spik X ({int(m['px'])}%)")
+        elif is_hunter_mode and s_edge > 0:
+            roles.append("💎 Värdespik")
+            expl.append(f"💎 Jägarens Värdespik: {s_sign} ({s_prob}% chans, {s_edge:+}% Edge!)")
+        else:
+            roles.append("🔒 Säker Spik" if is_safe_mode else "🔒 AI-Spik")
+            expl.append(f"⚡ Stark spik: {s_sign} ({s_prob}% AI-chans)")
     elif i in halv_m:
         if m["H2H"]:
             best_w = "1" if m["p1"] >= m["p2"] else "2"
             chosen = sorted(["X", best_w], key=lambda x: {"1":0, "X":1, "2":2}[x])
             expl.append(f"🎯 H2H-Lås: {''.join(chosen)} (Täcker {int(m['px']+m['p'+best_w.lower()])}% av duellen!)")
-        elif product == "powerplay" and (is_safe_mode or abs(m["p1"] - m["p2"]) <= 12):
-            # HOCKEY-SÄKRING: Undvik '12'-gaffel, lås starkaste laget + X (övertidsgardering!)
+        elif product == "powerplay" and (is_safe_mode or (not is_hunter_mode and abs(m["p1"] - m["p2"]) <= 12)):
             best_team = "1" if m["p1"] >= m["p2"] else "2"
             chosen = ["1", "X"] if best_team == "1" else ["X", "2"]
             expl.append(f"🛡️ Hockey-lås ({''.join(chosen)}): Säkrat med kryss vid full tid!")
         else:
-            w_e = 0.3 if is_safe_mode else 0.9
-            sr = sorted(["1", "X", "2"], key=lambda s: m[f"p{s.lower()}"] + m[f"v{s.lower()}"]*w_e, reverse=True)
+            # FIX 3: I Jägaren straffas grovt överstreckade favoriter även i halvgarderingar (möjliggör X2/1X-skrällås!)
+            def sign_score(s):
+                prob, edge, folk = m[f"p{s.lower()}"], m[f"v{s.lower()}"], m[f"s{s.lower()}"]
+                if is_safe_mode: return prob + (edge * 0.3)
+                if is_hunter_mode:
+                    pen = -18.0 if (folk >= 65.0 and edge <= -7.0) else 0.0
+                    return prob + (edge * 2.0) + pen
+                return prob + (edge * 0.9)
+            sr = sorted(["1", "X", "2"], key=sign_score, reverse=True)
             chosen = sorted(sr[:2], key=lambda x: {"1":0, "X":1, "2":2}[x])
             expl.append(f"⚖️ Halvgardering: {', '.join(chosen)} ({int(sum(m['p'+c.lower()] for c in chosen))}% chans)")
         selections.append(chosen)
@@ -203,7 +242,8 @@ for i in range(num_matches):
     else:
         selections.append(["1", "X", "2"])
         roles.append("💣 Helgardering")
-        expl.append("🔥 Helgarderad (100% täckning i matchen)")
+        best_dog = max(["1", "X", "2"], key=lambda s: m[f"v{s.lower()}"])
+        expl.append(f"🔥 Helgarderad (Jagar skrällvärdet på '{best_dog}': {m['v'+best_dog.lower()]:+}% Edge)")
 
 all_rows = list(itertools.product(*selections))
 sign_map = {"1": 0, "X": 1, "2": 2}
@@ -221,26 +261,44 @@ payouts = np.round(((0.28 if num_matches == 13 else 0.70) / r_folk) * stake_per_
 prob_sum = np.sum(p_mat[m_idx, r_idx]*100, axis=1)
 edge_sum = np.sum(e_mat[m_idx, r_idx], axis=1)
 underdogs = np.sum(f_mat[m_idx, r_idx] <= 0.22, axis=1)
+draws_cnt = np.sum(r_idx == 1, axis=1)
 
-# Poängsättning utifrån vald säkerhetsprofil
+# FIX 4b: Återställt kryss-filter för 13-matcherskuponger (undviker 0 kryss eller 7+ kryss)
+draw_pen = np.where((draws_cnt == 0) | (draws_cnt >= 7), -80.0, 0.0) if num_matches == 13 else 0.0
+
 if is_safe_mode:
-    # Straffa rader med fler än 2 skrällar på Powerplay så att vi bara väljer högsannolika rader!
     dog_pen = np.where(underdogs >= (3 if num_matches == 8 else 5), -120.0, 0.0)
-    scores = (prob_sum * 1.45) + (edge_sum * 0.45) + dog_pen
-    min_req_payout = int(max_budget * 0.8) # Kasta aldrig bort en vinnande favoritrad i säkert läge!
-elif strategy.startswith("Helautomatisk"):
-    dog_pen = np.where(underdogs >= (4 if num_matches == 8 else 6), -100.0, 0.0)
-    scores = (prob_sum * 0.85) + (edge_sum * 1.50) + dog_pen
-    min_req_payout = max(int(max_budget * 1.8), 180 if num_matches == 8 else 1200)
+    scores = (prob_sum * 1.45) + (edge_sum * 0.45) + dog_pen + draw_pen
+    min_req_payout = int(max_budget * 0.8)
+elif is_hunter_mode:
+    dog_bonus = np.where((underdogs >= 2) & (underdogs <= (4 if num_matches == 8 else 6)), 55.0, -90.0)
+    scores = (prob_sum * 0.45) + (edge_sum * 2.40) + dog_bonus + draw_pen
+    min_req_payout = max(int(max_budget * 3.5), 400 if num_matches == 8 else 3000)
 else:
-    scores = (prob_sum * 0.50) + (edge_sum * 2.30)
-    min_req_payout = max(int(max_budget * 3.0), 350 if num_matches == 8 else 2500)
+    dog_pen = np.where(underdogs >= (4 if num_matches == 8 else 6), -100.0, 0.0)
+    scores = (prob_sum * 0.85) + (edge_sum * 1.50) + dog_pen + draw_pen
+    min_req_payout = max(int(max_budget * 1.8), 180 if num_matches == 8 else 1200)
 
 valid = np.where(payouts >= min_req_payout)[0]
 if len(valid) < allowed_max_rows: valid = np.arange(len(all_rows))
 
 sorted_v = valid[np.argsort(scores[valid])[::-1]]
-selected_idx = list(sorted_v[:allowed_max_rows])
+
+min_dist = 2 if (num_matches == 13 and allowed_max_rows <= 400) else 1
+selected_idx = []
+for idx in sorted_v:
+    if len(selected_idx) >= allowed_max_rows: break
+    cand = r_idx[idx]
+    if not selected_idx or np.all(np.sum(r_idx[selected_idx] != cand, axis=1) >= min_dist):
+        selected_idx.append(idx)
+
+if len(selected_idx) < allowed_max_rows:
+    chosen_set = set(selected_idx)
+    for idx in sorted_v:
+        if len(selected_idx) >= allowed_max_rows: break
+        if idx not in chosen_set:
+            selected_idx.append(idx)
+            chosen_set.add(idx)
 
 filtered_rows = [all_rows[i] for i in selected_idx]
 final_payouts = payouts[selected_idx]
@@ -262,9 +320,11 @@ st.divider()
 st.subheader("📊 AI-Motorns Matchanalys")
 table_rows = [{
     "Match": f"{m['Nr']}. {m['Match']}",
-    "Typ": "🎯 H2H" if m["H2H"] else "🏒 Match",
+    "Statistik": m["Stat"] if m["Stat"] else "Odds + TT",
+    "Typ": "🎯 H2H" if m["H2H"] else "⚽/🏒 Match",
     "Folket (1-X-2)": f"{int(m['s1'])}%-{int(m['sx'])}%-{int(m['s2'])}%",
     "AI-Chans": f"{int(m['p1'])}%-{int(m['px'])}%-{int(m['p2'])}%",
+    "Bästa Edge": f"{max(['1','X','2'], key=lambda s: m['v'+s.lower()])} ({max(m['v1'],m['vx'],m['v2']):+}%)",
     "Beslut": roles[i],
     "Tecken": ", ".join(selections[i]),
     "Kommentar": expl[i]
