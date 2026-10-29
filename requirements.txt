@@ -3,5 +3,3 @@ requests
 pandas
 numpy
 scipy
-shin
-pulp
