@@ -4,13 +4,12 @@ import pandas as pd
 import numpy as np
 import itertools
 from scipy.special import softmax
-import shin
-import pulp
+from scipy.optimize import brentq, milp, LinearConstraint, Bounds
 
 st.set_page_config(page_title="Quant Pool Engine", layout="wide")
 st.title("🧠 Quant Pool Engine – Shin, Logit & MILP-Optimering")
 st.markdown(
-    "Matematiskt validerad motor med **Shin De-vigging**, **Log-Odds Ensemble** och **Linjär Programmering (PuLP)**."
+    "Matematiskt validerad motor med **Shin De-vigging**, **Log-Odds Ensemble** och **Linjär Programmering (SciPy HiGHS MILP)**."
 )
 
 # --- 1. SIDOMENY & INSTÄLLNINGAR ---
@@ -35,7 +34,7 @@ else:
     stake_per_row = st.sidebar.selectbox("Insats per rad (kr)", [1, 2, 5, 10], index=0)
 
 strategy = st.sidebar.selectbox(
-    "3. Optimeringsmål (PuLP MILP)",
+    "3. Optimeringsmål (MILP)",
     [
         "Optimal EV (Maximerar Log-Utility: Vinstchans x Utdelningsproxy)",
         "Trygg & Säker (Maximerar exakt gemensam sannolikhet för full pott)",
@@ -141,7 +140,7 @@ def extract_verified_metadata(ev, extra_ev):
             h_rank = r_val if r_val is not None else h_rank
             h_form = f_val if f_val is not None else h_form
         elif "away" in t_type:
-            a_rank = r_val if r_val is not None else a_rank
+            a_rank = r_val if a_rank is not None else a_rank
             a_form = f_val if f_val is not None else a_form
 
     if isinstance(extra_ev, dict):
@@ -170,17 +169,24 @@ def extract_verified_metadata(ev, extra_ev):
 
 
 def compute_shin_probabilities(o1, ox, o2):
-    """Använder mberk/shin för exakt av-marginalisering av odds."""
+    """Exakt Shin (1993) de-vigging löst direkt med SciPy brentq (inga externa kompileringskrav)."""
     if o1 and ox and o2 and o1 > 1.0 and ox > 1.0 and o2 > 1.0:
+        inv = np.array([1.0 / o1, 1.0 / ox, 1.0 / o2], dtype=np.float64)
+        S = float(np.sum(inv))
+        if S <= 1.0001:
+            return inv / S
         try:
-            probs = shin.calculate_implied_probabilities([o1, ox, o2])
-            p_arr = np.array(probs, dtype=np.float64)
+            def shin_obj(z):
+                p = (np.sqrt(z**2 + 4.0 * (1.0 - z) * (inv**2) / S) - z) / (2.0 * (1.0 - z))
+                return float(np.sum(p) - 1.0)
+
+            z_opt = brentq(shin_obj, 1e-9, 0.999)
+            p_arr = (np.sqrt(z_opt**2 + 4.0 * (1.0 - z_opt) * (inv**2) / S) - z_opt) / (2.0 * (1.0 - z_opt))
             if np.all(np.isfinite(p_arr)) and np.all(p_arr > 0):
                 return p_arr / np.sum(p_arr)
         except Exception:
             pass
-        inv = np.array([1.0 / o1, 1.0 / ox, 1.0 / o2], dtype=np.float64)
-        return inv / np.sum(inv)
+        return inv / S
     return None
 
 
@@ -218,20 +224,16 @@ for ev in events:
     desc = ev.get("eventDescription", f"Match {num}")
     ex = extra_map.get(num, {})
 
-    # 1. Validera Svenska Folket (Inga påhittade 40/24/36-siffror!)
     sf = ev.get("svenskaFolket") or ex.get("svenskaFolket") or {}
     s1_raw, sx_raw, s2_raw = safe_float(sf.get("one")), safe_float(sf.get("x")), safe_float(sf.get("two"))
     if s1_raw is not None and sx_raw is not None and s2_raw is not None and (s1_raw + sx_raw + s2_raw) > 0:
         s_vec = np.array([s1_raw, sx_raw, s2_raw], dtype=np.float64)
         s_vec = np.clip(s_vec, 0.5, 99.0)
         s_probs = s_vec / np.sum(s_vec)
-        has_folket = True
     else:
         s_probs = np.array([1 / 3, 1 / 3, 1 / 3], dtype=np.float64)
-        has_folket = False
         missing_folk_warnings.append(num)
 
-    # 2. Validera Marknadsodds via Shin
     odds = ev.get("odds") or ex.get("odds") or {}
     o1, ox, o2 = safe_float(odds.get("one")), safe_float(odds.get("x")), safe_float(odds.get("two"))
     shin_probs = compute_shin_probabilities(o1, ox, o2)
@@ -244,17 +246,14 @@ for ev in events:
         base_probs = shin_probs
         odds_source = f"Shin ({o1:.2f}-{ox:.2f}-{o2:.2f})"
 
-    # 3. Extrahera TT, Tabell & Form och kombinera i Log-Odds-rymden (garanterat > 0)
     tt = ev.get("tioTidningarsTips") or ev.get("newspaperAdvice") or ex.get("tioTidningarsTips") or {}
     tt1, ttx, tt2 = safe_int(tt.get("one")) or 0, safe_int(tt.get("x")) or 0, safe_int(tt.get("two")) or 0
     tt_sum = tt1 + ttx + tt2
 
     h_r, a_r, h_f, a_f, ev_type, stat_str = extract_verified_metadata(ev, ex)
 
-    # Arbeta i log-space (logits) för att undvika negativa sannolikheter
     logits = np.log(np.clip(base_probs, 1e-4, 1.0))
 
-    # Mjuk Bayesian-uppdatering i log-space om TT och Statistik finns
     if tt_sum >= 5:
         tt_smoothed = np.array([tt1 + 0.5, ttx + 0.5, tt2 + 0.5]) / (tt_sum + 1.5)
         logits = 0.92 * logits + 0.08 * np.log(tt_smoothed)
@@ -271,8 +270,6 @@ for ev in events:
 
     model_probs = softmax(logits)
     edges = (model_probs - s_probs) * 100.0
-
-    # Förväntat värde (EV-ratio per tecken: p_i / s_i)
     ev_ratios = model_probs / np.clip(s_probs, 0.005, 1.0)
 
     match_data.append({
@@ -316,7 +313,6 @@ else:
     else:
         t_spik, t_halv = 1, 3
 
-# Rankning av spikkandidater utan påhittade H2H-tvång
 spik_scores = []
 for i, m in enumerate(match_data):
     p_v = m["p_vec"]
@@ -328,7 +324,6 @@ for i, m in enumerate(match_data):
         best_i = int(np.argmax(p_v))
         score = float(p_v[best_i] * 100.0)
     elif is_hunter:
-        # Kräver minst 35 % vinstchans för en spik, rankar efter kombination av sannolikhet och log-EV
         valid_cands = [idx for idx in range(3) if p_v[idx] >= 0.35] or [int(np.argmax(p_v))]
         best_i = max(valid_cands, key=lambda idx: p_v[idx] * 100.0 + edges_v[idx] * 1.5)
         score = float(p_v[best_i] * 100.0 + edges_v[best_i] * 1.5)
@@ -358,7 +353,6 @@ for i, m in enumerate(match_data):
             f"Spik {s_char}: {p_v[s_idx]*100:.1f}% sannolikhet (Edge: {e_v[s_idx]:+.1f}%)"
         )
     elif i in halv_set:
-        # Välj det par av tecken (1X, X2 eller 12) som maximerar mål-funktionen
         pairs = [(0, 1), (1, 2), (0, 2)]
         if is_safe:
             best_pair = max(pairs, key=lambda pr: p_v[pr[0]] + p_v[pr[1]])
@@ -381,7 +375,7 @@ for i, m in enumerate(match_data):
         )
 
 
-# --- 5. EXAKT RADOPTIMERING MED PULP (MILP) & SANN RADSANNOLIKHET ---
+# --- 5. EXAKT RADOPTIMERING MED SCIPY MILP (HiGHS) & SANN RADSANNOLIKHET ---
 all_rows = list(itertools.product(*selections))
 num_ram_rows = len(all_rows)
 target_k = min(allowed_max_rows, num_ram_rows)
@@ -396,122 +390,36 @@ m_arange = np.arange(expected_matches)
 row_p_matrix = p_mat[m_arange, r_idx]
 row_s_matrix = s_mat[m_arange, r_idx]
 
-# Sann gemensam radsannolikhet under oberoendeantagande: prod(p_i)
 joint_row_probs = np.prod(row_p_matrix, axis=1)
 joint_folk_probs = np.prod(row_s_matrix, axis=1)
 
-# Teoretisk utdelningsproxy (under antagande om oberoende streck, per 1 kr omsättning)
 payout_proxies = (pool_share / np.clip(joint_folk_probs, 1e-12, 1.0)) * stake_per_row
 ev_indices = joint_row_probs * (pool_share / np.clip(joint_folk_probs, 1e-12, 1.0))
 
-# Målvektor för Linjär Programmering (PuLP)
 if is_safe:
-    # Maximerar summan av joint_row_probs -> Maximerar den modellerade chansen att få alla rätt!
     obj_weights = joint_row_probs * 1e6
 elif is_hunter:
-    # Viktat mot högt EV-index och skrällpotential, men förankrat i sannolikhet
     obj_weights = (joint_row_probs ** 0.65) * (ev_indices ** 0.60) * 1e6
 else:
-    # Optimal: Maximerar förväntad Kelly/Log-nytta (balans mellan sannolikhet och övervärde)
     obj_weights = (joint_row_probs ** 0.85) * (ev_indices ** 0.35) * 1e6
 
-# Bygg och lös MILP-problemet med PuLP
-prob_milp = pulp.LpProblem("Coupon_Portfolio_Optimization", pulp.LpMaximize)
-x_vars = [pulp.LpVariable(f"r_{r}", cat=pulp.LpBinary) for r in range(num_ram_rows)]
+# Bygg MILP-tvång med SciPy HiGHS (snabb C-implementerad lösare inbyggd i SciPy)
+A_rows = [np.ones(num_ram_rows, dtype=np.float64)]
+lb_list = [float(target_k)]
+ub_list = [float(target_k)]
 
-# Mål: Maximera portföljens totala objektivvärde
-prob_milp += pulp.lpSum(obj_weights[r] * x_vars[r] for r in range(num_ram_rows))
-
-# Tvång 1: Exakt target_k rader ska väljas
-prob_milp += pulp.lpSum(x_vars) == target_k
-
-# Tvång 2: Garanterad minimikvot för varje garderad utgång (Tecken-Garanti utan ad-hoc loopar)
 for m_i, signs in enumerate(selections):
     if len(signs) > 1:
         quota_rows = max(1, int(np.floor(target_k * min_sign_quota)))
-        # Säkerställ att kvoten är matematiskt möjlig (t.ex. max 33% vid 3 tecken)
         max_feasible = int(np.floor(target_k / len(signs)))
         req_count = min(quota_rows, max_feasible)
         for s_char in signs:
             s_code = sign_to_idx[s_char]
-            matching_rows = np.where(r_idx[:, m_i] == s_code)[0]
-            if len(matching_rows) >= req_count:
-                prob_milp += pulp.lpSum(x_vars[r] for r in matching_rows) >= req_count
+            indicator = (r_idx[:, m_i] == s_code).astype(np.float64)
+            if np.sum(indicator) >= req_count:
+                A_rows.append(indicator)
+                lb_list.append(float(req_count))
+                ub_list.append(float(target_k))
 
-# Lös med CBC-solvern (tyst läge)
-prob_milp.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=5))
-
-selected_idx = [r for r in range(num_ram_rows) if pulp.value(x_vars[r]) is not None and pulp.value(x_vars[r]) > 0.5]
-
-# Fallback om MILP mot förmodan inte returnerar exakt antal
-if len(selected_idx) != target_k:
-    selected_idx = list(np.argsort(obj_weights)[::-1][:target_k])
-
-filtered_rows = [all_rows[i] for i in selected_idx]
-sel_probs = joint_row_probs[selected_idx]
-sel_ev = ev_indices[selected_idx]
-sel_proxies = payout_proxies[selected_idx]
-
-
-# --- 6. PRESENTATION & TRANSPARENTA NYCKELTAL ---
-st.subheader(f"🎯 Optimerad Portfölj: {export_name} (Omgång {draw_number})")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Valda rader", f"{len(filtered_rows)} st", f"Ur ram på {num_ram_rows:,} rader".replace(",", " "))
-c2.metric("Total kostnad", f"{len(filtered_rows) * stake_per_row} kr", f"Spikar: {t_spik} | Halv: {t_halv}")
-c3.metric(
-    "Chans till full pott (Modell)",
-    f"{np.sum(sel_probs) * 100:.2f} %",
-    "Summa av gemensam radsannolikhet",
-)
-c4.metric(
-    "Medel EV-kvot (Värdeindex)",
-    f"{np.mean(sel_ev):.2f}x",
-    f"Median Payout-Proxy: ~{int(np.median(sel_proxies)):,} kr".replace(",", " "),
-)
-
-st.caption(
-    "ℹ️ *Notera: 'Chans till full pott' är den exakta summan av radernas gemensamma sannolikhet under antagande om oberoende matcher. "
-    "'Payout-Proxy' är en teoretisk skattning baserad på streckfördelningen (exklusive eventuell jackpot och faktisk omsättning).*"
-)
-
-if product in ["stryktipset", "europatipset"]:
-    header_line = f"{export_name},Omg={draw_number}"
-else:
-    header_line = f"{export_name},Omg={draw_number},Insats={stake_per_row}"
-
-file_content = "\n".join([header_line] + ["E," + ",".join(r) for r in filtered_rows])
-
-st.download_button(
-    label=f"📥 Ladda ner matematiskt optimerad systemfil ({len(filtered_rows) * stake_per_row} kr)",
-    data=file_content,
-    file_name=f"{product}_omg_{draw_number}.txt",
-    mime="text/plain",
-    type="primary",
-    use_container_width=True,
-)
-
-st.divider()
-
-# --- 7. DETALJERAD ANALYSTABELL MED FAKTISK TECKENFÖRDELNING I PORTFÖLJEN ---
-st.subheader("📊 Matchanalys & Faktisk Teckenfördelning i Dina Valda Rader")
-
-sel_r_matrix = r_idx[selected_idx]
-table_rows = []
-
-for i, m in enumerate(match_data):
-    # Räkna hur många procent av de valda raderna som faktiskt har 1, X respektive 2
-    cnt_1 = int(np.sum(sel_r_matrix[:, i] == 0))
-    cnt_x = int(np.sum(sel_r_matrix[:, i] == 1))
-    cnt_2 = int(np.sum(sel_r_matrix[:, i] == 2))
-    tot_sel = max(len(selected_idx), 1)
-    dist_str = f"{int(round(cnt_1/tot_sel*100))}% / {int(round(cnt_x/tot_sel*100))}% / {int(round(cnt_2/tot_sel*100))}%"
-
-    edges = {"1": m["v1"], "X": m["vx"], "2": m["v2"]}
-    best_s = max(edges, key=edges.get)
-
-    table_rows.append({
-        "Match": f"{m['Nr']}. {m['Match']}",
-        "Underlag": m["Källa"],
-        "Folket (1-X-2)": f"{m['s1']:.0f}% - {m['sx']:.0f}% - {m['s2']:.0f}%",
-        "TT":
+A_matrix = np.vstack(A_rows)
+constraints =
