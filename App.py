@@ -221,4 +221,143 @@ for ev in events:
     match_data.append({
         "Nr": num, "Match": desc,
         "Källa": f"{odds_source}" + (f" | {stat_str}" if stat_str else ""),
-        "s1": s
+        "s1": s_probs[0]*100, "sx": s_probs[1]*100, "s2": s_probs[2]*100,
+        "p1": model_probs[0]*100, "px": model_probs[1]*100, "p2": model_probs[2]*100,
+        "v1": edges[0], "vx": edges[1], "v2": edges[2],
+        "p_vec": model_probs, "s_vec": s_probs,
+        "tt_str": f"{tt1}-{ttx}-{tt2}" if tt_sum > 0 else "Ej släppt",
+    })
+
+if missing_odds: st.warning(f"⚠️ Marknadsodds saknas för match {missing_odds}.")
+if missing_folk: st.warning(f"⚠️ Streckfördelning saknas för match {missing_folk}.")
+
+allowed_max_rows = max(int(max_budget / stake_per_row), 1)
+is_safe = strategy.startswith("Trygg")
+is_hunter = strategy.startswith("Skräll")
+
+if expected_matches == 13:
+    t_spik, t_halv = (6, 4) if allowed_max_rows <= 64 else ((5, 4) if allowed_max_rows <= 160 else ((4, 5) if allowed_max_rows <= 350 else (4, 4)))
+else:
+    t_spik, t_halv = (3, 3) if allowed_max_rows <= 48 else ((2, 3) if allowed_max_rows <= 160 else (1, 3))
+
+spik_scores = []
+signs_list = ["1", "X", "2"]
+for i, m in enumerate(match_data):
+    p_v, s_v = m["p_vec"], m["s_vec"]
+    edges_v = (p_v - s_v) * 100.0
+    if is_safe:
+        best_i = int(np.argmax(p_v))
+        sc = float(p_v[best_i] * 100.0)
+    elif is_hunter:
+        cands = [idx for idx in range(3) if p_v[idx] >= 0.35] or [int(np.argmax(p_v))]
+        best_i = max(cands, key=lambda idx: p_v[idx] * 100.0 + edges_v[idx] * 1.5)
+        sc = float(p_v[best_i] * 100.0 + edges_v[best_i] * 1.5)
+    else:
+        best_i = int(np.argmax(p_v))
+        sc = float(p_v[best_i] * 100.0 + edges_v[best_i] * 0.75)
+    spik_scores.append((i, signs_list[best_i], sc))
+
+ranked_matches = sorted(spik_scores, key=lambda x: x[2], reverse=True)
+spik_map = {idx: s_ch for idx, s_ch, _ in ranked_matches[:t_spik]}
+halv_set = {idx for idx, _, _ in ranked_matches[t_spik : t_spik + t_halv]}
+
+selections, roles, explanations = [], [], []
+for i, m in enumerate(match_data):
+    p_v, s_v = m["p_vec"], m["s_vec"]
+    e_v = (p_v - s_v) * 100.0
+    if i in spik_map:
+        s_ch = spik_map[i]
+        s_ix = signs_list.index(s_ch)
+        selections.append([s_ch])
+        roles.append("🔒 Spik")
+        explanations.append(f"Spik {s_ch}: {p_v[s_ix]*100:.1f}% chans (Edge: {e_v[s_ix]:+.1f}%)")
+    elif i in halv_set:
+        pairs = [(0, 1), (1, 2), (0, 2)]
+        w_e = 0.0 if is_safe else (1.2 if is_hunter else 0.5)
+        best_p = max(pairs, key=lambda pr: (p_v[pr[0]] + p_v[pr[1]]) * 100 + (e_v[pr[0]] + e_v[pr[1]]) * w_e)
+        chosen = [signs_list[best_p[0]], signs_list[best_p[1]]]
+        cov = (p_v[best_p[0]] + p_v[best_p[1]]) * 100.0
+        selections.append(chosen)
+        roles.append("🛡️ Halvgardering")
+        explanations.append(f"Låser {''.join(chosen)} (Täcker {cov:.1f}% av sannolikheten)")
+    else:
+        selections.append(["1", "X", "2"])
+        roles.append("💣 Helgardering")
+        b_ix = int(np.argmax(e_v))
+        explanations.append(f"Helgarderad (Bäst Edge: '{signs_list[b_ix]}' {e_v[b_ix]:+.1f}%)")
+
+all_rows = list(itertools.product(*selections))
+num_ram_rows = len(all_rows)
+target_k = min(allowed_max_rows, num_ram_rows)
+
+sign_to_idx = {"1": 0, "X": 1, "2": 2}
+r_idx = np.array([[sign_to_idx[s] for s in r] for r in all_rows], dtype=np.int32)
+p_mat = np.array([m["p_vec"] for m in match_data], dtype=np.float64)
+s_mat = np.array([m["s_vec"] for m in match_data], dtype=np.float64)
+
+m_arange = np.arange(expected_matches)
+joint_row_probs = np.prod(p_mat[m_arange, r_idx], axis=1)
+joint_folk_probs = np.prod(s_mat[m_arange, r_idx], axis=1)
+
+payout_proxies = (pool_share / np.clip(joint_folk_probs, 1e-12, 1.0)) * stake_per_row
+ev_indices = joint_row_probs * (pool_share / np.clip(joint_folk_probs, 1e-12, 1.0))
+
+if is_safe: obj_weights = joint_row_probs * 1e6
+elif is_hunter: obj_weights = (joint_row_probs ** 0.65) * (ev_indices ** 0.60) * 1e6
+else: obj_weights = (joint_row_probs ** 0.85) * (ev_indices ** 0.35) * 1e6
+
+A_rows = [np.ones(num_ram_rows, dtype=np.float64)]
+lb_list, ub_list = [float(target_k)], [float(target_k)]
+
+for m_i, signs in enumerate(selections):
+    if len(signs) > 1:
+        req = min(max(1, int(np.floor(target_k * min_sign_quota))), int(np.floor(target_k / len(signs))))
+        for s_ch in signs:
+            ind = (r_idx[:, m_i] == sign_to_idx[s_ch]).astype(np.float64)
+            if np.sum(ind) >= req:
+                A_rows.append(ind); lb_list.append(float(req)); ub_list.append(float(target_k))
+
+res = milp(c=-obj_weights, integrality=np.ones(num_ram_rows), bounds=Bounds(0, 1), constraints=LinearConstraint(np.vstack(A_rows), lb_list, ub_list))
+selected_idx = list(np.where(np.round(res.x) == 1)[0]) if (res.success and res.x is not None) else []
+if len(selected_idx) != target_k:
+    selected_idx = list(np.argsort(obj_weights)[::-1][:target_k])
+
+filtered_rows = [all_rows[i] for i in selected_idx]
+sel_probs, sel_ev, sel_proxies = joint_row_probs[selected_idx], ev_indices[selected_idx], payout_proxies[selected_idx]
+
+st.subheader(f"🎯 Optimerad Portfölj: {export_name} (Omgång {draw_number})")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Valda rader", f"{len(filtered_rows)} st", f"Ur ram på {num_ram_rows} rader")
+c2.metric("Total kostnad", f"{len(filtered_rows) * stake_per_row} kr", f"Spikar: {t_spik} | Halv: {t_halv}")
+c3.metric("Chans till full pott", f"{np.sum(sel_probs) * 100:.2f} %", "Exakt gemensam sannolikhet")
+c4.metric("Medel EV-kvot", f"{np.mean(sel_ev):.2f}x", f"Median Proxy: ~{int(np.median(sel_proxies))} kr")
+
+header_line = f"{export_name},Omg={draw_number}" if product in ["stryktipset", "europatipset"] else f"{export_name},Omg={draw_number},Insats={stake_per_row}"
+file_content = "\n".join([header_line] + ["E," + ",".join(r) for r in filtered_rows])
+st.download_button(f"📥 Ladda ner optimerad systemfil ({len(filtered_rows) * stake_per_row} kr)", data=file_content, file_name=f"{product}_omg_{draw_number}.txt", mime="text/plain", type="primary", use_container_width=True)
+
+st.divider()
+st.subheader("📊 Matchanalys & Faktisk Teckenfördelning")
+sel_r_matrix = r_idx[selected_idx]
+table_rows = []
+for i, m in enumerate(match_data):
+    tot_sel = max(len(selected_idx), 1)
+    p1_d = int(round(np.sum(sel_r_matrix[:, i] == 0) / tot_sel * 100))
+    px_d = int(round(np.sum(sel_r_matrix[:, i] == 1) / tot_sel * 100))
+    p2_d = int(round(np.sum(sel_r_matrix[:, i] == 2) / tot_sel * 100))
+    edges = {"1": m["v1"], "X": m["vx"], "2": m["v2"]}
+    b_s = max(edges, key=edges.get)
+    row_d = {
+        "Match": f"{m['Nr']}. {m['Match']}",
+        "Underlag": m["Källa"],
+        "Folket": f"{m['s1']:.0f}%-{m['sx']:.0f}%-{m['s2']:.0f}%",
+        "Modell (Shin)": f"{m['p1']:.1f}%-{m['px']:.1f}%-{m['p2']:.1f}%",
+        "Bästa Edge": f"{b_s} ({edges[b_s]:+.1f}%)",
+        "Beslut": roles[i],
+        "Tecken": ", ".join(selections[i]),
+        "Fördelning i rader": f"{p1_d}% / {px_d}% / {p2_d}%",
+        "Notering": explanations[i]
+    }
+    table_rows.append(row_d)
+
+st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
