@@ -1,4 +1,4 @@
-"""Quant Pool Engine 2.0: probabilistic pool coupon explorer (not a betting service)."""
+"""Quant Pool Engine 3.0: probabilistic pool coupon explorer (not a betting service)."""
 import io
 import heapq
 import math
@@ -216,40 +216,69 @@ def generate_candidates(p, s, k, candidate_cap=25000):
 
 
 def optimize(p, s, budget, stake, balance=0.30):
-    """Diversified score heuristic, not globally optimal expected monetary value."""
+    """Choose exact rows with a transparent probability floor for value strategies.
+
+    balance=0 returns the mathematically highest-probability K rows.
+    Other values retain at least (1-balance) of that baseline probability mass,
+    then prefer less publicly popular rows among a bounded candidate set.
+    No monetary expected value is claimed.
+    """
     p = np.asarray(p, dtype=float)
     if p.ndim != 2 or p.shape[1] != 3 or len(p) not in (8, 13):
         raise ValueError('Endast 8 eller 13 matcher stöds')
-    if np.any(p <= 0) or not np.all(np.isfinite(p)) or not np.allclose(p.sum(axis=1), 1):
+    if not np.all(np.isfinite(p)) or np.any(p <= 0) or not np.allclose(p.sum(axis=1), 1):
         raise ValueError('Ogiltiga sannolikheter')
     if s is not None:
         s = np.asarray(s, dtype=float)
-        if s.shape != p.shape or np.any(s < 0) or not np.allclose(s.sum(axis=1), 1):
+        if s.shape != p.shape or not np.all(np.isfinite(s)) or np.any(s < 0) or not np.allclose(s.sum(axis=1), 1):
             raise ValueError('Ogiltiga streckandelar')
-    if stake <= 0 or budget < stake:
+    if not math.isfinite(float(budget)) or not math.isfinite(float(stake)) or stake <= 0 or budget < stake:
         raise ValueError('Budgeten måste räcka till minst en rad')
+    if not 0 <= balance <= 1:
+        raise ValueError('Risknivå måste ligga mellan 0 och 1')
     k = min(int(budget // stake), 3**len(p))
-    candidates, method = generate_candidates(p, s, k)
-    idx = np.asarray(candidates, dtype=np.int8)
-    match_idx = np.arange(len(p))
-    log_prob = np.log(p[match_idx, idx]).sum(axis=1)
-    prob = np.exp(log_prob)
-    if s is not None:
-        log_folk = np.log(np.clip(s[match_idx, idx], 0.015, 1)).sum(axis=1)
-        rarity = np.maximum(0, log_prob - log_folk)
-        rarity = np.clip(rarity, 0, 8)
-        score = log_prob + balance*rarity
+    baseline = np.asarray(top_k_rows(p, k), dtype=np.int8)
+    match_ix = np.arange(len(p))
+    base_probs = np.prod(p[match_ix, baseline], axis=1)
+    baseline_mass = float(base_probs.sum())
+    if s is None or balance == 0:
+        chosen = baseline
+        method = 'Exakt topp-K efter sannolikhet' if balance == 0 else 'Exakt topp-K (streck saknas)'
+        candidate_count = k
     else:
-        score = log_prob.copy()
-    # Select highest heuristic score; row probability remains exact within model.
-    selected = np.argsort(-score, kind='stable')[:k]
-    chosen = idx[selected]
-    selected_probs = prob[selected]
+        candidates, _ = generate_candidates(p, s, k)
+        idx = np.asarray(sorted(set(map(tuple, candidates)) | set(map(tuple, baseline))), dtype=np.int8)
+        probs = np.prod(p[match_ix, idx], axis=1)
+        public = np.prod(np.clip(s[match_ix, idx], 0.015, 1), axis=1)
+        # A smooth popularity-adjusted ranking, then enforce a portfolio-wide
+        # probability floor by mixing back highest-probability baseline rows.
+        score = np.log(probs) - balance * np.log(public)
+        chosen_indices = np.argsort(-score, kind='stable')[:k]
+        chosen_set = set(map(tuple, idx[chosen_indices]))
+        chosen_mass = sum(float(np.prod(p[match_ix, row])) for row in chosen_set)
+        floor = (1 - balance) * baseline_mass
+        if chosen_mass < floor - 1e-14:
+            # Replace weakest selected non-baseline candidates with strongest
+            # missing baseline rows until the probability floor is satisfied.
+            base_set = set(map(tuple, baseline))
+            removable = sorted((row for row in chosen_set if row not in base_set),
+                               key=lambda row: float(np.prod(p[match_ix, row])))
+            missing = [tuple(row) for row in baseline if tuple(row) not in chosen_set]
+            for outgoing, incoming in zip(removable, missing):
+                chosen_set.remove(outgoing)
+                chosen_set.add(incoming)
+                chosen_mass += float(np.prod(p[match_ix, incoming]) - np.prod(p[match_ix, outgoing]))
+                if chosen_mass >= floor - 1e-14:
+                    break
+        chosen = np.asarray(sorted(chosen_set), dtype=np.int8)
+        candidate_count = len(idx)
+        method = f'Streckjusterad kandidatoptimering; minst {100*(1-balance):.0f} % av topp-K-träffchansen'
+    selected_probs = np.prod(p[match_ix, chosen], axis=1)
     return {'rows': chosen, 'probabilities': selected_probs,
             'full_hit_chance': float(selected_probs.sum()), 'cost': k*stake,
-            'method': method, 'candidate_count': len(candidates),
+            'method': method, 'candidate_count': candidate_count,
+            'baseline_chance': baseline_mass,
             'is_global_optimum': bool(s is None or balance == 0)}
-
 
 
 def assess_rows(rows, p, s=None):
@@ -291,13 +320,64 @@ def parse_legacy_txt(content, expected_matches):
 
 
 def strategy_comparison(p, s, budget, stake, balance=0.30):
-    """Same budget; probabilities and popularity are indicators, not payouts."""
-    specs = [('Högsta träffchans', 0.0), ('Balanserad', balance),
-             ('Mer streckvärde', 0.65)]
-    results = {}
-    for name, weight in specs:
-        results[name] = optimize(p, s, budget, stake, weight)
-    return results
+    """A: exact probability; B: bounded compromise; C: value-oriented proxy."""
+    return {
+        'Högsta träffchans': optimize(p, s, budget, stake, 0),
+        'Balanserad': optimize(p, s, budget, stake, balance),
+        'Mer streckvärde': optimize(p, s, budget, stake, 0.65),
+    }
+
+
+def sign_distribution(rows):
+    arr = np.asarray(rows, dtype=int)
+    if arr.ndim != 2 or len(arr) == 0 or np.any((arr < 0) | (arr > 2)):
+        raise ValueError('Ogiltiga rader')
+    return np.stack([(arr == i).mean(axis=0) for i in range(3)], axis=1)
+
+
+def rows_txt(rows, product, draw_number):
+    arr = np.asarray(rows, dtype=int)
+    if arr.ndim != 2 or arr.shape[1] not in (8, 13) or len(arr) == 0 or np.any((arr < 0) | (arr > 2)):
+        raise ValueError('Ogiltiga rader för TXT-export')
+    lines = [f'{product.capitalize()},Omg={draw_number}']
+    lines.extend('E,' + ','.join(SIGNS[x] for x in row) for row in arr)
+    return ('\r\n'.join(lines) + '\r\n').encode('utf-8')
+
+
+def backtest_rounds(df, budget=300, stake=1, balance=0.30):
+    """Evaluate historical snapshots (pre-match probabilities, streck and final outcomes).
+
+    Expected CSV columns: draw, match, p1, px, p2, s1, sx, s2, result.
+    Every draw must contain exactly 8 or 13 matches. Returns one record per
+    draw/strategy. Does not estimate winnings without historical prize data.
+    """
+    needed = {'draw', 'match', 'p1', 'px', 'p2', 's1', 'sx', 's2', 'result'}
+    if not needed.issubset(df.columns):
+        raise ValueError('Historikfilen saknar kolumner: ' + ', '.join(sorted(needed-set(df.columns))))
+    output = []
+    for draw, part in df.groupby('draw', sort=False):
+        part = part.sort_values('match')
+        n = len(part)
+        if n not in (8, 13) or part['match'].duplicated().any():
+            raise ValueError(f'Omgång {draw}: måste ha 8 eller 13 unika matcher')
+        p = part[['p1','px','p2']].to_numpy(dtype=float)
+        s = part[['s1','sx','s2']].to_numpy(dtype=float)
+        if not np.all(np.isfinite(p)) or np.any(p <= 0) or not np.allclose(p.sum(axis=1), 1):
+            raise ValueError(f'Omgång {draw}: ogiltiga matchsannolikheter')
+        if not np.all(np.isfinite(s)) or np.any(s < 0) or not np.allclose(s.sum(axis=1), 1):
+            raise ValueError(f'Omgång {draw}: ogiltiga streck')
+        results = part['result'].astype(str).str.upper().tolist()
+        if any(x not in SIGNS for x in results):
+            raise ValueError(f'Omgång {draw}: ogiltiga matchresultat')
+        actual = np.array([SIGNS.index(x) for x in results])
+        for name, ticket in strategy_comparison(p, s, budget, stake, balance).items():
+            hits = (ticket['rows'] == actual).sum(axis=1)
+            output.append({'Omgång': draw, 'Strategi': name, 'Rader': len(hits),
+                           'Kostnad (kr)': ticket['cost'],
+                           'Modellchans (%)': ticket['full_hit_chance']*100,
+                           'Max rätt': int(hits.max()),
+                           'Antal fullträffar': int(np.count_nonzero(hits == n))})
+    return pd.DataFrame(output)
 
 
 def rows_csv(rows):
@@ -306,8 +386,8 @@ def rows_csv(rows):
 
 
 def app():
-    st.set_page_config(page_title='Quant Pool Engine 2.0', page_icon='🧠', layout='wide')
-    st.title('🧠 Quant Pool Engine 2.0')
+    st.set_page_config(page_title='Quant Pool Engine 3.0', page_icon='🧠', layout='wide')
+    st.title('🧠 Quant Pool Engine 3.0')
     st.caption('Automatisk kuponganalys för Powerplay och Stryktipset – med tydlig riskredovisning.')
     selected = st.sidebar.selectbox('Spelform', list(PRODUCTS))
     product, count = PRODUCTS[selected]
@@ -315,8 +395,8 @@ def app():
     stake = 1 if count == 13 else st.sidebar.selectbox('Radinsats (kr)', [1, 2, 5, 10])
     if count == 13:
         st.sidebar.caption('13-matchersspel: 1 kr per rad enligt befintlig app. Kontrollera aktuella villkor.')
-    balance = st.sidebar.slider('Utdelningsorientering (experimentell)', 0, 70, 30, 5) / 100
-    st.sidebar.caption('0 = bara träffchans. Högre värde prioriterar mindre populära rader. Inte en avkastningsprognos.')
+    balance = st.sidebar.slider('B: tillåten förlust av träffchans (%)', 0, 70, 30, 5) / 100
+    st.sidebar.caption('B garanteras minst 100 minus valt procenttal av A:s modellerade träffchans. C använder 65 % gräns. Ingen avkastningsprognos.')
     if st.sidebar.button('🔄 Uppdatera API-data'):
         get_draws.clear()
         st.rerun()
@@ -364,69 +444,4 @@ def app():
     a.metric('Kupongkostnad', f"{result['cost']} kr")
     b.metric('Modellchans till alla rätt', f"{result['full_hit_chance']:.3%}")
     c.metric('Antal rader', f"{len(result['rows']):,}".replace(',', ' '))
-    st.caption('Chansen förutsätter oberoende matcher och korrekta sannolikheter. Historisk kalibrering saknas.')
-    st.caption('Nyckeltalen ovan avser den balanserade standardstrategin. Nedan kan du välja andra strategier.')
-    st.subheader('Strategijämförelse')
-    strategies = strategy_comparison(p, s, budget, stake, balance)
-    comparison = []
-    for name, strategy in strategies.items():
-        evaluation = assess_rows(strategy['rows'], p, s)
-        comparison.append({'Strategi': name, 'Rader': evaluation['rows'],
-                           'Kostnad (kr)': strategy['cost'],
-                           'Modellchans alla rätt (%)': round(evaluation['chance']*100, 5),
-                           'Folkets täckta sannolikhetsmassa (%)': round(evaluation.get('public_mass', float('nan'))*100, 5)})
-    st.dataframe(pd.DataFrame(comparison), use_container_width=True, hide_index=True)
-    st.caption('Folkets sannolikhetsmassa är ett mått på popularitet, INTE förväntad utdelning eller ROI. '
-               'Träffchans bygger på samma modell för alla strategier.')
-    choice = st.selectbox('Visa och exportera strategi', list(strategies), index=1)
-    result = strategies[choice]
-    old_upload = st.file_uploader('Jämför med äldre Svenska Spel-radfil (.txt)', type=['txt'])
-    if old_upload is not None:
-        try:
-            old_rows = parse_legacy_txt(old_upload.getvalue(), count)
-            old_eval = assess_rows(old_rows, p, s)
-            new_eval = assess_rows(result['rows'], p, s)
-            overlap = len(set(map(tuple, old_rows)) & set(map(tuple, result['rows'])))
-            st.write({'Gammal fil – antal rader': len(old_rows),
-                      'Gammal fil – modellchans (%)': round(old_eval['chance']*100, 5),
-                      'Vald strategi – modellchans (%)': round(new_eval['chance']*100, 5),
-                      'Gemensamma rader': overlap})
-            if len(old_rows)*stake != result['cost']:
-                st.warning('Olika kostnad: jämförelsen är inte budgetneutral.')
-        except (ValueError, UnicodeError) as exc:
-            st.error(f'Kunde inte läsa gamla kupongen: {exc}')
-    st.download_button('⬇️ Exportera vald strategi som CSV', rows_csv(result['rows']),
-                       file_name=f"{product}_{draw.get('drawNumber')}_{choice.replace(' ', '_')}.csv",
-                       mime='text/csv')
-    st.subheader('Matchanalys')
-    table = []
-    for i, m in enumerate(matches):
-        used = set(int(x) for x in result['rows'][:, i])
-        table.append({'Nr': m['nr'] or i+1, 'Match': m['match'],
-                      'Valda tecken': ''.join(SIGNS[j] for j in range(3) if j in used),
-                      'Typ': ('Spik' if len(used)==1 else 'Halv' if len(used)==2 else 'Hel'),
-                      'P(1) %': round(100*m['p'][0], 1), 'P(X) %': round(100*m['p'][1], 1),
-                      'P(2) %': round(100*m['p'][2], 1),
-                      'Streck 1 %': round(100*m['s'][0], 1) if m['s'] is not None else None,
-                      'Streck X %': round(100*m['s'][1], 1) if m['s'] is not None else None,
-                      'Streck 2 %': round(100*m['s'][2], 1) if m['s'] is not None else None,
-                      'Datakälla': m['source']})
-    st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
-    st.subheader('Valda rader')
-    row_df = pd.DataFrame([[SIGNS[x] for x in row] for row in result['rows']],
-                          columns=[f'M{i+1}' for i in range(count)])
-    row_df.insert(0, 'Rad', np.arange(1, len(row_df)+1))
-    row_df['Modellchans %'] = np.round(result['probabilities']*100, 6)
-    st.dataframe(row_df, use_container_width=True, hide_index=True, height=360)
-    st.download_button('⬇️ Ladda ned rader som CSV', rows_csv(result['rows']),
-                       file_name=f"{product}_{draw.get('drawNumber')}_rader.csv", mime='text/csv')
-    with st.expander('Metod, begränsningar och datakvalitet'):
-        st.write(f"Metod: {result['method']}. Kandidatrader: {result['candidate_count']}.")
-        st.write('Optimeringen är en heuristik: ingen garanti för högsta utdelning eller ekonomisk avkastning.')
-        st.write('CSV är en analysfil, inte ett verifierat uppladdningsformat hos Svenska Spel.')
-        st.write('Ingen automatisk insats, kontoinloggning eller spelinlämning utförs.')
-        st.write('För ekonomiska slutsatser krävs historiska odds, streck, verkliga utdelningar och backtesting.')
-
-
-if __name__ == '__main__':
-    app()
+    st.caption('Chansen förutsätter oberoende matcher och korrekta sannolikheter. Historisk kalibrering s
