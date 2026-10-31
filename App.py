@@ -251,6 +251,55 @@ def optimize(p, s, budget, stake, balance=0.30):
             'is_global_optimum': bool(s is None or balance == 0)}
 
 
+
+def assess_rows(rows, p, s=None):
+    """Evaluate unique exact rows with the same model probabilities."""
+    arr = np.asarray(rows, dtype=int)
+    p = np.asarray(p, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != len(p) or len(arr) == 0:
+        raise ValueError('Fel antal matcher eller tom radfil')
+    if np.any((arr < 0) | (arr > 2)) or len(np.unique(arr, axis=0)) != len(arr):
+        raise ValueError('Ogiltiga tecken eller dubbletter i radfilen')
+    ix = np.arange(len(p))
+    probs = np.prod(p[ix, arr], axis=1)
+    out = {'rows': len(arr), 'chance': float(probs.sum()), 'probabilities': probs}
+    if s is not None:
+        public = np.prod(np.clip(np.asarray(s)[ix, arr], 1e-8, 1), axis=1)
+        out['public_mass'] = float(public.sum())
+        out['popularity_ratio'] = float(np.sum(probs / np.maximum(public, 1e-12)) / len(arr))
+    return out
+
+
+def parse_legacy_txt(content, expected_matches):
+    """Read Svenska Spel style E,1,X,2 rows. Header is ignored."""
+    content = content.decode('utf-8-sig') if isinstance(content, bytes) else content
+    rows = []
+    for line in content.splitlines():
+        parts = [x.strip().upper() for x in line.split(',')]
+        if not parts or parts[0] != 'E':
+            continue
+        signs = parts[1:]
+        if len(signs) != expected_matches or any(x not in SIGNS for x in signs):
+            raise ValueError('Felaktig E-rad i TXT-filen')
+        rows.append([SIGNS.index(x) for x in signs])
+    if not rows:
+        raise ValueError('Inga E-rader hittades')
+    arr = np.asarray(rows, dtype=np.int8)
+    if len(np.unique(arr, axis=0)) != len(arr):
+        raise ValueError('TXT-filen innehåller dubbletter')
+    return arr
+
+
+def strategy_comparison(p, s, budget, stake, balance=0.30):
+    """Same budget; probabilities and popularity are indicators, not payouts."""
+    specs = [('Högsta träffchans', 0.0), ('Balanserad', balance),
+             ('Mer streckvärde', 0.65)]
+    results = {}
+    for name, weight in specs:
+        results[name] = optimize(p, s, budget, stake, weight)
+    return results
+
+
 def rows_csv(rows):
     df = pd.DataFrame([[SIGNS[x] for x in row] for row in rows], columns=[f'M{i+1}' for i in range(rows.shape[1])])
     return df.to_csv(index=False, sep=';').encode('utf-8-sig')
@@ -316,6 +365,39 @@ def app():
     b.metric('Modellchans till alla rätt', f"{result['full_hit_chance']:.3%}")
     c.metric('Antal rader', f"{len(result['rows']):,}".replace(',', ' '))
     st.caption('Chansen förutsätter oberoende matcher och korrekta sannolikheter. Historisk kalibrering saknas.')
+    st.caption('Nyckeltalen ovan avser den balanserade standardstrategin. Nedan kan du välja andra strategier.')
+    st.subheader('Strategijämförelse')
+    strategies = strategy_comparison(p, s, budget, stake, balance)
+    comparison = []
+    for name, strategy in strategies.items():
+        evaluation = assess_rows(strategy['rows'], p, s)
+        comparison.append({'Strategi': name, 'Rader': evaluation['rows'],
+                           'Kostnad (kr)': strategy['cost'],
+                           'Modellchans alla rätt (%)': round(evaluation['chance']*100, 5),
+                           'Folkets täckta sannolikhetsmassa (%)': round(evaluation.get('public_mass', float('nan'))*100, 5)})
+    st.dataframe(pd.DataFrame(comparison), use_container_width=True, hide_index=True)
+    st.caption('Folkets sannolikhetsmassa är ett mått på popularitet, INTE förväntad utdelning eller ROI. '
+               'Träffchans bygger på samma modell för alla strategier.')
+    choice = st.selectbox('Visa och exportera strategi', list(strategies), index=1)
+    result = strategies[choice]
+    old_upload = st.file_uploader('Jämför med äldre Svenska Spel-radfil (.txt)', type=['txt'])
+    if old_upload is not None:
+        try:
+            old_rows = parse_legacy_txt(old_upload.getvalue(), count)
+            old_eval = assess_rows(old_rows, p, s)
+            new_eval = assess_rows(result['rows'], p, s)
+            overlap = len(set(map(tuple, old_rows)) & set(map(tuple, result['rows'])))
+            st.write({'Gammal fil – antal rader': len(old_rows),
+                      'Gammal fil – modellchans (%)': round(old_eval['chance']*100, 5),
+                      'Vald strategi – modellchans (%)': round(new_eval['chance']*100, 5),
+                      'Gemensamma rader': overlap})
+            if len(old_rows)*stake != result['cost']:
+                st.warning('Olika kostnad: jämförelsen är inte budgetneutral.')
+        except (ValueError, UnicodeError) as exc:
+            st.error(f'Kunde inte läsa gamla kupongen: {exc}')
+    st.download_button('⬇️ Exportera vald strategi som CSV', rows_csv(result['rows']),
+                       file_name=f"{product}_{draw.get('drawNumber')}_{choice.replace(' ', '_')}.csv",
+                       mime='text/csv')
     st.subheader('Matchanalys')
     table = []
     for i, m in enumerate(matches):
