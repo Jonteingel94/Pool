@@ -444,4 +444,93 @@ def app():
     a.metric('Kupongkostnad', f"{result['cost']} kr")
     b.metric('Modellchans till alla rätt', f"{result['full_hit_chance']:.3%}")
     c.metric('Antal rader', f"{len(result['rows']):,}".replace(',', ' '))
-    st.caption('Chansen förutsätter oberoende matcher och korrekta sannolikheter. Historisk kalibrering s
+    st.caption('Chansen förutsätter oberoende matcher och korrekta sannolikheter. Historisk kalibrering saknas.')
+    st.caption('Nyckeltalen ovan avser strategi B. Strategi A är ett exakt topp-K-optimum enligt matchmodellen.')
+    st.subheader('Strategijämförelse')
+    strategies = strategy_comparison(p, s, budget, stake, balance)
+    comparison = []
+    for name, strategy in strategies.items():
+        evaluation = assess_rows(strategy['rows'], p, s)
+        comparison.append({'Strategi': name, 'Rader': evaluation['rows'],
+                           'Kostnad (kr)': strategy['cost'],
+                           'Modellchans alla rätt (%)': round(evaluation['chance']*100, 5),
+                           'Folkets täckta sannolikhetsmassa (%)': round(evaluation.get('public_mass', float('nan'))*100, 5)})
+    st.dataframe(pd.DataFrame(comparison), use_container_width=True, hide_index=True)
+    st.caption('Folkets sannolikhetsmassa är ett mått på popularitet, INTE förväntad utdelning eller ROI. '
+               'Träffchans bygger på samma modell för alla strategier.')
+    choice = st.selectbox('Visa och exportera strategi', list(strategies), index=1)
+    result = strategies[choice]
+    old_upload = st.file_uploader('Jämför med äldre Svenska Spel-radfil (.txt)', type=['txt'])
+    if old_upload is not None:
+        try:
+            old_rows = parse_legacy_txt(old_upload.getvalue(), count)
+            old_eval = assess_rows(old_rows, p, s)
+            new_eval = assess_rows(result['rows'], p, s)
+            overlap = len(set(map(tuple, old_rows)) & set(map(tuple, result['rows'])))
+            st.write({'Gammal fil – antal rader': len(old_rows),
+                      'Gammal fil – modellchans (%)': round(old_eval['chance']*100, 5),
+                      'Vald strategi – modellchans (%)': round(new_eval['chance']*100, 5),
+                      'Gemensamma rader': overlap})
+            if len(old_rows)*stake != result['cost']:
+                st.warning('Olika kostnad: jämförelsen är inte budgetneutral.')
+        except (ValueError, UnicodeError) as exc:
+            st.error(f'Kunde inte läsa gamla kupongen: {exc}')
+    st.download_button('⬇️ Exportera vald strategi som CSV', rows_csv(result['rows']),
+                       file_name=f"{product}_{draw.get('drawNumber')}_{choice.replace(' ', '_')}.csv",
+                       mime='text/csv')
+    st.download_button('⬇️ Exportera E-rader som TXT (ej verifierat inlämningsformat)',
+                       rows_txt(result['rows'], product, draw.get('drawNumber')),
+                       file_name=f"{product}_{draw.get('drawNumber')}_rader.txt", mime='text/plain')
+    st.subheader('Teckenfördelning på valda rader')
+    allocation = sign_distribution(result['rows'])
+    st.dataframe(pd.DataFrame({'Match': np.arange(1, count+1),
+                               '1 (%)': np.round(allocation[:, 0]*100, 1),
+                               'X (%)': np.round(allocation[:, 1]*100, 1),
+                               '2 (%)': np.round(allocation[:, 2]*100, 1)}),
+                 use_container_width=True, hide_index=True)
+    st.caption('Teckenfördelningen beskriver de spelade raderna, inte sannolikheten för respektive match.')
+    st.subheader('Matchanalys')
+    table = []
+    for i, m in enumerate(matches):
+        used = set(int(x) for x in result['rows'][:, i])
+        table.append({'Nr': m['nr'] or i+1, 'Match': m['match'],
+                      'Valda tecken': ''.join(SIGNS[j] for j in range(3) if j in used),
+                      'Typ': ('Spik' if len(used)==1 else 'Halv' if len(used)==2 else 'Hel'),
+                      'P(1) %': round(100*m['p'][0], 1), 'P(X) %': round(100*m['p'][1], 1),
+                      'P(2) %': round(100*m['p'][2], 1),
+                      'Streck 1 %': round(100*m['s'][0], 1) if m['s'] is not None else None,
+                      'Streck X %': round(100*m['s'][1], 1) if m['s'] is not None else None,
+                      'Streck 2 %': round(100*m['s'][2], 1) if m['s'] is not None else None,
+                      'Datakälla': m['source']})
+    st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
+    st.subheader('Valda rader')
+    row_df = pd.DataFrame([[SIGNS[x] for x in row] for row in result['rows']],
+                          columns=[f'M{i+1}' for i in range(count)])
+    row_df.insert(0, 'Rad', np.arange(1, len(row_df)+1))
+    row_df['Modellchans %'] = np.round(result['probabilities']*100, 6)
+    st.dataframe(row_df, use_container_width=True, hide_index=True, height=360)
+    st.download_button('⬇️ Ladda ned rader som CSV', rows_csv(result['rows']),
+                       file_name=f"{product}_{draw.get('drawNumber')}_rader.csv", mime='text/csv')
+    with st.expander('Historisk testning – importera egna omgångar'):
+        st.caption('Ladda upp CSV med kolumner: draw, match, p1, px, p2, s1, sx, s2, result. '
+                   'Sannolikheter och streck måste vara sparade före matchstart, inte hämtade i efterhand.')
+        history_upload = st.file_uploader('Historiska omgångar (CSV)', type=['csv'], key='history')
+        if history_upload is not None:
+            try:
+                history = pd.read_csv(history_upload, sep=None, engine='python')
+                history_result = backtest_rounds(history, budget, stake, balance)
+                st.dataframe(history_result, use_container_width=True, hide_index=True)
+                st.download_button('Ladda ned backtestresultat', history_result.to_csv(index=False).encode('utf-8-sig'),
+                                   file_name='quant_pool_backtest.csv', mime='text/csv')
+            except (ValueError, pd.errors.ParserError, UnicodeError) as exc:
+                st.error(f'Historikfilen kunde inte analyseras: {exc}')
+    with st.expander('Metod, begränsningar och datakvalitet'):
+        st.write(f"Metod: {result['method']}. Kandidatrader: {result['candidate_count']}.")
+        st.write('A är exakt topp-K enligt antagandet om oberoende matcher. B och C använder kandidatbaserad heuristik med sannolikhetsgolv; ingen garanti om högsta utdelning.')
+        st.write('CSV är en analysfil, inte ett verifierat uppladdningsformat hos Svenska Spel.')
+        st.write('Ingen automatisk insats, kontoinloggning eller spelinlämning utförs.')
+        st.write('För ekonomiska slutsatser krävs historiska odds, streck, verkliga utdelningar och backtesting.')
+
+
+if __name__ == '__main__':
+    app()
