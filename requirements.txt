@@ -4,3 +4,4 @@ pandas
 numpy
 scipy
 pytest
+psycopg[binary]>=3.1,<4
