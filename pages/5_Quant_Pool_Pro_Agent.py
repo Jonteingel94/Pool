@@ -30,7 +30,8 @@ if not st.session_state.get('authenticated'):
     supplied=st.text_input('App-lösenord',type='password')
     if st.button('Logga in'):
         import hmac
-        if hmac.compare_digest(supplied, str(password)):
+        if hmac.compare_digest(str(supplied).encode("utf-8"), str(password).encode("utf-8")):
+
             st.session_state['authenticated']=True
             st.rerun()
         else: st.error('Fel lösenord')
