@@ -39,21 +39,58 @@ if not st.session_state.get('authenticated'):
 @st.cache_data(ttl=120,show_spinner=False)
 def get_coupon(product,number): return fetch_draw(product,number)
 
+@st.cache_data(ttl=300, show_spinner=False)
+def available_draws(product):
+    """Read real draw numbers; never invent numbers when the feed fails."""
+    return list_draws(product)
+
 with st.sidebar:
     st.header('Inställningar')
-    product=st.selectbox('Spel',list(PRODUCTS))
-    draw=st.number_input('Omgång',min_value=1,value=4977,step=1)
-    if st.button('Hämta kupong',type='primary'):
+    product=st.selectbox('Spel', list(PRODUCTS), key='agent_product')
+    st.caption('Omgångarna hämtas automatiskt för det spel du väljer.')
+
+    draw_options = []
+    draw_error = None
+    try:
+        draw_options = available_draws(product)
+    except (FeedError, ValueError, TypeError, KeyError) as exc:
+        draw_error = str(exc)
+
+    # Different widget keys per product preserve each game's own selection.
+    if draw_options:
+        st.caption(f'{len(draw_options)} tillgängliga omgångar hittades.')
+        draw = st.selectbox(
+            'Välj omgång',
+            options=draw_options,
+            format_func=lambda number: f'Omgång {number}',
+            key=f'agent_draw_{product}',
+        )
+        st.caption('Senast listade omgången väljs först. Kontrollera matcherna och spelstopp innan spel.')
+        if st.button('Uppdatera omgångslista'):
+            available_draws.clear()
+            st.rerun()
+    else:
+        st.warning('Kunde inte hämta omgångslistan automatiskt.' + (f' {draw_error}' if draw_error else ' Inga omgångar returnerades.'))
+        draw = st.number_input(
+            'Ange omgång manuellt', min_value=1, value=1, step=1,
+            key=f'agent_manual_draw_{product}',
+        )
+        if st.button('Försök hämta omgångar igen'):
+            available_draws.clear()
+            st.rerun()
+
+    if st.button('Hämta kupong', type='primary'):
         try:
-            st.session_state['agent_coupon']=get_coupon(product,int(draw))
-            st.session_state.pop('agent_rows',None)
-            st.session_state.pop('agent_reports',None)
-            st.session_state.pop('agent_snapshot_id',None)
-        except (FeedError,ValueError) as exc: st.error(str(exc))
+            st.session_state['agent_coupon'] = get_coupon(product, int(draw))
+            st.session_state.pop('agent_rows', None)
+            st.session_state.pop('agent_reports', None)
+            st.session_state.pop('agent_snapshot_id', None)
+        except (FeedError, ValueError) as exc:
+            st.error(str(exc))
     if st.button('Logga ut'):
-        st.session_state['authenticated']=False
+        st.session_state['authenticated'] = False
         st.rerun()
-    st.caption('Databas: '+('PostgreSQL (beständig)' if secret('DATABASE_URL') else 'SQLite (tillfällig på Streamlit Cloud)'))
+    st.caption('Databas: ' + ('PostgreSQL (beständig)' if secret('DATABASE_URL') else 'SQLite (tillfällig på Streamlit Cloud)'))
 
 try:
     store=Store(url=secret('DATABASE_URL') or None)
