@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from quantpro.auto_data import PRODUCTS, fetch_draw, list_draws, FeedError
 from quantpro.pro_analysis import top_rows, summarize, export_txt, value_table
-from quantpro.research import FootballResearch, ResearchError
+from quantpro.public_research import load_results, analyze_match, PublicResearchError
 from quantpro.agent import forecast
 from quantpro.memory import Store, utcnow
 from quantpro.backtest import score_history
@@ -109,6 +109,7 @@ if fetch_pressed:
         st.session_state['agent_coupon'] = get_coupon(product, int(draw))
         st.session_state.pop('agent_rows', None)
         st.session_state.pop('agent_reports', None)
+        st.session_state.pop('agent_public_reports', None)
         st.session_state.pop('agent_snapshot_id', None)
     except (FeedError, ValueError) as exc:
         st.error(str(exc))
@@ -129,7 +130,7 @@ except Exception as exc:
 
 coupon=st.session_state.get('agent_coupon')
 if not coupon or coupon['product']!=product or coupon['number']!=int(draw):
-    st.info('Välj spel och omgång i sidomenyn och tryck Hämta kupong.')
+    st.info('Välj spel och omgång ovan och tryck Hämta kupong.')
     st.stop()
 
 matches=coupon['matches']
@@ -199,22 +200,46 @@ with analysis_tab:
             except (ValueError,TypeError) as exc: st.error(f'Ogiltig spelstopptid: {exc}')
             except Exception as exc: st.error(str(exc))
 
+@st.cache_data(ttl=21600,show_spinner=False)
+def public_results():
+    return load_results()
+
 with research_tab:
-    st.write('Hämta verifierad lagform från API-Football. Lagidentifiering måste vara exakt; felaktiga lagmatchningar avvisas.')
-    key=secret('API_FOOTBALL_KEY')
-    if not key: st.info('Lägg till API_FOOTBALL_KEY i Streamlit Secrets för att aktivera research.')
-    choice=st.selectbox('Researchmatch',list(range(len(matches))),format_func=lambda i:f"{i+1}. {matches[i]['Hemma']} – {matches[i]['Borta']}")
-    h=st.text_input('Hemma (API-Football-namn)',value=matches[choice]['Hemma'])
-    a=st.text_input('Borta (API-Football-namn)',value=matches[choice]['Borta'])
-    if st.button('Undersök match',disabled=not bool(key)):
+    st.subheader('🔎 Research utan API-nyckel')
+    st.caption('Källa: football-data.co.uk. Offentliga matchresultat för utvalda europeiska ligor. Sverige och vissa cupmatcher kan saknas.')
+    if st.button('🔎 Starta fullständig research',type='primary',use_container_width=True):
         try:
-            report=FootballResearch(key).report(h,a)
-            st.session_state.setdefault('agent_reports',{})[choice]=report
-        except ResearchError as exc: st.error(str(exc))
-    report=st.session_state.get('agent_reports',{}).get(choice)
-    if report:
-        st.json(report,expanded=False)
-        st.caption('Källa och tidsstämpel ingår. Ej tillgänglig research fylls inte ut med AI-gissningar.')
+            with st.spinner('Hämtar och jämför matchhistorik... Detta kan ta en stund första gången.'):
+                history,load_warnings=public_results()
+                reports={}
+                progress=st.progress(0)
+                for i,m in enumerate(matches):
+                    reports[i]=analyze_match(m['Hemma'],m['Borta'],history)
+                    progress.progress((i+1)/len(matches))
+                st.session_state['agent_public_reports']=reports
+                st.session_state['agent_public_warnings']=load_warnings
+            st.success(f'Research klar: {sum(r["status"]=="ok" for r in reports.values())} av {len(matches)} matcher hittades med entydig lagmatchning.')
+        except (PublicResearchError,Exception) as exc:
+            st.error(f'Research kunde inte slutföras: {exc}')
+    reports=st.session_state.get('agent_public_reports',{})
+    if reports:
+        overview=[]
+        for i,m in enumerate(matches):
+            r=reports.get(i,{})
+            hf=r.get('home_form',{}); af=r.get('away_form',{})
+            overview.append({'Nr':i+1,'Match':f"{m['Hemma']} – {m['Borta']}",
+                             'Status':'Verifierad matchhistorik' if r.get('status')=='ok' else 'Saknar data',
+                             'Hemma PPG':hf.get('points_per_game'),'Borta PPG':af.get('points_per_game')})
+        st.dataframe(pd.DataFrame(overview),hide_index=True,use_container_width=True)
+        i=st.selectbox('Visa matchresearch',range(len(matches)),format_func=lambda i:f"{i+1}. {matches[i]['Hemma']} – {matches[i]['Borta']}")
+        st.json(reports.get(i,{}),expanded=False)
+        st.download_button('📥 Ladda ner research JSON',json.dumps(reports,ensure_ascii=False,indent=2).encode('utf-8'),f'{product}_{draw}_research.json',mime='application/json')
+        st.warning('Skador, avstängningar och startelvor verifieras inte av denna datakälla. Researchen visas som beslutsunderlag och ändrar INTE automatiskt systemgeneratorns sannolikheter.')
+        if st.session_state.get('agent_public_warnings'):
+            with st.expander('Datakällor som inte kunde läsas'):
+                st.write(st.session_state['agent_public_warnings'])
+    else:
+        st.info('Tryck på knappen för att undersöka alla matcher. Ingen API-nyckel behövs.')
 
 with system_tab:
     missing=sum(m['odds'] is None for m in matches)
