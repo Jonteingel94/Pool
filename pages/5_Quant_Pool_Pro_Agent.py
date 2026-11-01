@@ -31,7 +31,6 @@ if not st.session_state.get('authenticated'):
     if st.button('Logga in'):
         import hmac
         if hmac.compare_digest(str(supplied).encode("utf-8"), str(password).encode("utf-8")):
-
             st.session_state['authenticated']=True
             st.rerun()
         else: st.error('Fel lösenord')
@@ -144,7 +143,7 @@ with research_tab:
 with system_tab:
     missing=sum(m['odds'] is None for m in matches)
     budget=st.number_input('Budget (kr)',min_value=1,max_value=10000,value=300,step=50)
-    stake=st.number_input('Insats per rad (kr)',min_value=0.1,max_value=100,value=1.0,step=0.5)
+    stake=st.number_input('Insats per rad (kr)',min_value=0.1,max_value=100.0,value=1.0,step=0.5)
     count=int(budget//stake)
     st.write(f'Antal rader: **{count}**')
     if missing: st.warning(f'{missing} matcher saknar odds. Kan inte bygga ett pålitligt system.')
