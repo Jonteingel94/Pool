@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 from quantpro.auto_data import PRODUCTS, fetch_draw, list_draws, FeedError
 from quantpro.pro_analysis import top_rows, summarize, export_txt, value_table
+from quantpro.portfolio_v3 import diversified_rows, distribution_warnings
 from quantpro.public_research import load_results, analyze_match, PublicResearchError
 from quantpro.agent import forecast
 from quantpro.memory import Store, utcnow
@@ -247,17 +248,30 @@ with system_tab:
     stake=st.number_input('Insats per rad (kr)',min_value=0.1,max_value=100.0,value=1.0,step=0.5)
     count=int(budget//stake)
     st.write(f'Antal rader: **{count}**')
+    strategy=st.selectbox('Strategi', ['Balanserad (rekommenderad)', 'Spelvärde (experimentell)', 'Högsta sannolikhet (tidigare)'])
+    if strategy != 'Högsta sannolikhet (tidigare)':
+        max_share=st.slider('Högsta andel för ett tecken per match (%)', 40, 95, 75, 5)
+        st.caption('Begränsar hur många av raderna som får samma tecken. Detta är diversifiering, inte en garanti för högre vinst.')
+    else:
+        max_share=100
     if missing: st.warning(f'{missing} matcher saknar odds. Kan inte bygga ett pålitligt system.')
     elif count>10000: st.warning('Max 10 000 rader.')
-    elif st.button('Generera sannolikhetsbaserat system'):
+    elif st.button('Generera system',type='primary'):
         try:
-            st.session_state['agent_rows']=top_rows(matches,count)
+            if strategy == 'Högsta sannolikhet (tidigare)':
+                generated=top_rows(matches,count)
+            else:
+                generated=diversified_rows(matches,count, mode='value' if strategy.startswith('Spelvärde') else 'balanced', max_share=max_share/100, seed=2026)
+            st.session_state['agent_rows']=generated
+            st.session_state['agent_strategy']=strategy
         except ValueError as exc: st.error(str(exc))
     rows=st.session_state.get('agent_rows')
     if rows and not missing:
         stats=summarize(rows,matches)
         st.metric('Modellerad chans till alla rätt',f"{stats['chance_13_or_8']*100:.4f} %")
-        st.caption('Maximerar sannolikhet för alla rätt enligt oddsbaslinjen. Optimerar INTE för verklig poolutdelning.')
+        st.caption('Chansen beräknas från normaliserade marknadsodds. Balanserat/spelvärde prioriterar även spridning och maximerar inte nödvändigtvis chansen till alla rätt. Utdelning kan inte garanteras.')
+        for warning in distribution_warnings(rows): st.warning(warning)
+        st.write('Generator:',st.session_state.get('agent_strategy','Tidigare system'))
         st.dataframe(pd.DataFrame([{'Nr':i+1,**d} for i,d in enumerate(stats['distribution'])]),hide_index=True)
         st.download_button('Ladda ned Svenska Spel TXT',export_txt(rows,product,int(draw)),f'{product}_{draw}_rader.txt')
         if st.button('💾 Spara system i historiken'):
