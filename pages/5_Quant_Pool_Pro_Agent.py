@@ -16,6 +16,33 @@ from quantpro.memory import Store, utcnow
 from quantpro.backtest import score_history
 
 st.set_page_config(page_title='Quant Pool Pro Agent',page_icon='🧠',layout='wide')
+st.markdown("""
+<style>
+/* Compact, touch-friendly layout on phones. */
+.block-container { padding-top: 1.1rem; padding-bottom: 3rem; max-width: 1200px; }
+div.stButton > button, div.stDownloadButton > button,
+div[data-testid="stFormSubmitButton"] button {
+    min-height: 44px; border-radius: 12px; font-weight: 600;
+}
+div[data-baseweb="select"] > div,
+div[data-testid="stNumberInput"] input,
+div[data-testid="stTextInput"] input { min-height: 44px; }
+div[data-testid="stAlert"] { border-radius: 12px; }
+div[data-testid="stDataFrame"] { max-width: 100%; }
+@media (max-width: 700px) {
+    .block-container { padding: .75rem .85rem 4.5rem; }
+    h1 { font-size: 1.65rem !important; line-height: 1.2 !important; }
+    h2 { font-size: 1.25rem !important; }
+    h3 { font-size: 1.1rem !important; }
+    div[data-testid="stHorizontalBlock"] { gap: .55rem; }
+    div[data-testid="stTabs"] button { padding: .6rem .7rem; font-size: .87rem; }
+    div[data-testid="stDataFrame"] { overflow-x: auto; }
+    div.stButton > button, div.stDownloadButton > button { width: 100%; }
+    div[data-testid="stMetric"] { padding: .5rem 0; }
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title('🧠 Quant Pool Pro Agent')
 st.caption('Kuponger • Marknadsanalys • Verifierad formresearch • System • Historik • Backtesting')
 st.warning('Inga garanterade vinster. AI-research och formjustering är inte en bevisat lönsam prognos. Inga spel placeras automatiskt.')
@@ -44,50 +71,52 @@ def available_draws(product):
     """Read real draw numbers; never invent numbers when the feed fails."""
     return list_draws(product)
 
-with st.sidebar:
-    st.header('Inställningar')
-    product=st.selectbox('Spel', list(PRODUCTS), key='agent_product')
-    st.caption('Omgångarna hämtas automatiskt för det spel du väljer.')
+st.subheader('🎟️ Välj kupong')
+st.caption('Välj spel och omgång här direkt på mobilen – du behöver inte öppna sidomenyn.')
+product=st.selectbox('Spel', list(PRODUCTS), key='agent_product')
+draw_options = []
+draw_error = None
+try:
+    draw_options = available_draws(product)
+except (FeedError, ValueError, TypeError, KeyError) as exc:
+    draw_error = str(exc)
 
-    draw_options = []
-    draw_error = None
+if draw_options:
+    draw = st.selectbox(
+        'Omgång', options=draw_options,
+        format_func=lambda number: f'Omgång {number}',
+        key=f'agent_draw_{product}',
+    )
+    st.caption(f'{len(draw_options)} omgångar hittades. Kontrollera spelstopp före spel.')
+else:
+    st.warning('Automatisk omgångslista saknas.' + (f' {draw_error}' if draw_error else ''))
+    draw = st.number_input(
+        'Omgång (manuellt)', min_value=1, value=1, step=1,
+        key=f'agent_manual_draw_{product}',
+    )
+
+fetch_col, refresh_col = st.columns(2)
+with fetch_col:
+    fetch_pressed = st.button('📥 Hämta kupong', type='primary', use_container_width=True)
+with refresh_col:
+    refresh_pressed = st.button('🔄 Uppdatera', use_container_width=True)
+if refresh_pressed:
+    available_draws.clear()
+    get_coupon.clear()
+    st.rerun()
+if fetch_pressed:
     try:
-        draw_options = available_draws(product)
-    except (FeedError, ValueError, TypeError, KeyError) as exc:
-        draw_error = str(exc)
+        st.session_state['agent_coupon'] = get_coupon(product, int(draw))
+        st.session_state.pop('agent_rows', None)
+        st.session_state.pop('agent_reports', None)
+        st.session_state.pop('agent_snapshot_id', None)
+    except (FeedError, ValueError) as exc:
+        st.error(str(exc))
 
-    # Different widget keys per product preserve each game's own selection.
-    if draw_options:
-        st.caption(f'{len(draw_options)} tillgängliga omgångar hittades.')
-        draw = st.selectbox(
-            'Välj omgång',
-            options=draw_options,
-            format_func=lambda number: f'Omgång {number}',
-            key=f'agent_draw_{product}',
-        )
-        st.caption('Senast listade omgången väljs först. Kontrollera matcherna och spelstopp innan spel.')
-        if st.button('Uppdatera omgångslista'):
-            available_draws.clear()
-            st.rerun()
-    else:
-        st.warning('Kunde inte hämta omgångslistan automatiskt.' + (f' {draw_error}' if draw_error else ' Inga omgångar returnerades.'))
-        draw = st.number_input(
-            'Ange omgång manuellt', min_value=1, value=1, step=1,
-            key=f'agent_manual_draw_{product}',
-        )
-        if st.button('Försök hämta omgångar igen'):
-            available_draws.clear()
-            st.rerun()
-
-    if st.button('Hämta kupong', type='primary'):
-        try:
-            st.session_state['agent_coupon'] = get_coupon(product, int(draw))
-            st.session_state.pop('agent_rows', None)
-            st.session_state.pop('agent_reports', None)
-            st.session_state.pop('agent_snapshot_id', None)
-        except (FeedError, ValueError) as exc:
-            st.error(str(exc))
-    if st.button('Logga ut'):
+with st.sidebar:
+    st.header('⚙️ Inställningar')
+    st.caption('Appen är anpassad för mobil. Kupongval finns på startsidan.')
+    if st.button('Logga ut', use_container_width=True):
         st.session_state['authenticated'] = False
         st.rerun()
     st.caption('Databas: ' + ('PostgreSQL (beständig)' if secret('DATABASE_URL') else 'SQLite (tillfällig på Streamlit Cloud)'))
@@ -106,6 +135,7 @@ if not coupon or coupon['product']!=product or coupon['number']!=int(draw):
 matches=coupon['matches']
 st.success(f"{product} #{draw}: {len(matches)} matcher. Hämtad {coupon['fetched_at']} UTC")
 st.caption('Källa: '+coupon['url'])
+st.info('📱 Välj en flik nedan. Svep sidledes över flikarna om inte alla syns.')
 
 coupon_tab,analysis_tab,research_tab,system_tab,history_tab=st.tabs(['📋 Kupong','📊 Analys','🔎 Research','🎯 System','🗄️ Minne & test'])
 with coupon_tab:
@@ -117,8 +147,17 @@ with coupon_tab:
             'Streck 1 %':round(100*s[0],1) if s else None,
             'Streck X %':round(100*s[1],1) if s else None,
             'Streck 2 %':round(100*s[2],1) if s else None})
-    st.dataframe(pd.DataFrame(display),hide_index=True,use_container_width=True)
-    st.download_button('Exportera kupong CSV',pd.DataFrame(display).to_csv(index=False).encode('utf-8-sig'),f'{product}_{draw}.csv')
+    st.dataframe(
+        pd.DataFrame(display),
+        hide_index=True, use_container_width=True, height=390,
+        column_config={
+            'Nr': st.column_config.NumberColumn('Nr', width='small'),
+            'Hemma': st.column_config.TextColumn('Hemma', width='medium'),
+            'Borta': st.column_config.TextColumn('Borta', width='medium'),
+        },
+    )
+    st.caption('↔ Svep i tabellen för att se odds och streckprocent.')
+    st.download_button('📥 Exportera kupong CSV',pd.DataFrame(display).to_csv(index=False).encode('utf-8-sig'),f'{product}_{draw}.csv')
     if st.button('💾 Spara tidsstämplad kupong'):
         key=hashlib.sha256(f"{product}:{draw}:{coupon['fetched_at']}".encode()).hexdigest()[:24]
         try:
